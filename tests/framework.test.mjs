@@ -1,6 +1,139 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-test("Decoframe test runner is operational", () => {
-  assert.equal(1 + 1, 2);
+import {
+  compileComponent,
+  validateComponent,
+} from "../dist/index.js";
+
+const vehicleSchema = {
+  name: "Vehicle",
+  properties: {
+    make: {
+      type: "string",
+      required: true,
+    },
+    model: {
+      type: "string",
+      required: true,
+    },
+    electric: {
+      type: "boolean",
+      default: false,
+    },
+  },
+};
+
+const vehicle = {
+  name: "ElectricVehicle",
+  version: "1.0.0",
+  schema: "Vehicle",
+  properties: {
+    make: "Example Motors",
+    model: "E1",
+    electric: true,
+  },
+};
+
+test("valid component compiles to JSON", () => {
+  const result = compileComponent(vehicleSchema, vehicle);
+
+  assert.equal(result.ok, true);
+
+  if (result.ok) {
+    assert.deepEqual(JSON.parse(result.json), {
+      name: "ElectricVehicle",
+      version: "1.0.0",
+      schema: "Vehicle",
+      properties: {
+        make: "Example Motors",
+        model: "E1",
+        electric: true,
+      },
+    });
+  }
+});
+
+test("schema defaults are applied during compilation", () => {
+  const component = {
+    ...vehicle,
+    properties: {
+      make: "Example Motors",
+      model: "E1",
+    },
+  };
+
+  const result = compileComponent(vehicleSchema, component);
+
+  assert.equal(result.ok, true);
+
+  if (result.ok) {
+    assert.equal(
+      JSON.parse(result.json).properties.electric,
+      false,
+    );
+  }
+});
+
+test("missing required properties produce diagnostics", () => {
+  const component = {
+    ...vehicle,
+    properties: {
+      make: "Example Motors",
+    },
+  };
+
+  const diagnostics = validateComponent(vehicleSchema, component);
+
+  assert.ok(
+    diagnostics.some(
+      (diagnostic) =>
+        diagnostic.code === "MISSING_REQUIRED_PROPERTY" &&
+        diagnostic.path === "properties.model",
+    ),
+  );
+});
+
+test("unknown properties are rejected", () => {
+  const component = {
+    ...vehicle,
+    properties: {
+      ...vehicle.properties,
+      colour: "blue",
+    },
+  };
+
+  const result = compileComponent(vehicleSchema, component);
+
+  assert.equal(result.ok, false);
+
+  if (!result.ok) {
+    assert.ok(
+      result.diagnostics.some(
+        (diagnostic) => diagnostic.code === "UNKNOWN_PROPERTY",
+      ),
+    );
+  }
+});
+
+test("equivalent inputs produce identical JSON", () => {
+  const first = compileComponent(vehicleSchema, vehicle);
+
+  const reorderedVehicle = {
+    ...vehicle,
+    properties: {
+      electric: true,
+      model: "E1",
+      make: "Example Motors",
+    },
+  };
+
+  const second = compileComponent(vehicleSchema, reorderedVehicle);
+
+  assert.equal(first.ok, true);
+  assert.equal(second.ok, true);
+
+  if (first.ok && second.ok) {
+    assert.equal(first.json, second.json);
+  }
 });
