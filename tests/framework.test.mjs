@@ -274,3 +274,216 @@ test("inheritance cycles produce a diagnostic", () => {
     );
   }
 });
+
+const engineSchema = {
+  name: "Engine",
+  properties: {
+    fuel: {
+      type: "string",
+      required: true,
+    },
+    horsepower: {
+      type: "number",
+      required: true,
+    },
+    turbocharged: {
+      type: "boolean",
+      default: false,
+    },
+  },
+};
+
+const vehicleWithEngineSchema = {
+  name: "Vehicle",
+  properties: {
+    make: {
+      type: "string",
+      required: true,
+    },
+    model: {
+      type: "string",
+      required: true,
+    },
+    engine: {
+      type: "component",
+      schema: "Engine",
+      required: true,
+    },
+  },
+};
+
+const petrolEngine = {
+  name: "PetrolEngine",
+  version: "1.0.0",
+  schema: "Engine",
+  properties: {
+    fuel: "petrol",
+    horsepower: 150,
+  },
+};
+
+const familyCar = {
+  name: "FamilyCar",
+  version: "1.0.0",
+  schema: "Vehicle",
+  properties: {
+    make: "Example Motors",
+    model: "E1",
+    engine: {
+      name: "PetrolEngine",
+      version: "1.0.0",
+      properties: {
+        horsepower: 180,
+      },
+    },
+  },
+};
+
+test("nested component references compile recursively with overrides", () => {
+  const result = compileComponent(
+    vehicleWithEngineSchema,
+    familyCar,
+    [petrolEngine],
+    [vehicleSchema, engineSchema],
+  );
+
+  assert.equal(result.ok, true);
+
+  if (result.ok) {
+    const output = JSON.parse(result.json);
+
+    assert.deepEqual(output.properties.engine, {
+      name: "PetrolEngine",
+      version: "1.0.0",
+      schema: "Engine",
+      properties: {
+        fuel: "petrol",
+        horsepower: 180,
+        turbocharged: false,
+      },
+    });
+  }
+});
+
+test("missing nested component definitions produce a diagnostic", () => {
+  const result = compileComponent(
+    vehicleWithEngineSchema,
+    familyCar,
+    [],
+    [vehicleSchema, engineSchema],
+  );
+
+  assert.equal(result.ok, false);
+
+  if (!result.ok) {
+    assert.ok(
+      result.diagnostics.some(
+        (diagnostic) =>
+          diagnostic.code === "COMPONENT_NOT_FOUND",
+      ),
+    );
+  }
+});
+
+test("nested component schema mismatches produce a diagnostic", () => {
+  const invalidEngine = {
+    ...petrolEngine,
+    schema: "Vehicle",
+  };
+
+  const result = compileComponent(
+    vehicleWithEngineSchema,
+    familyCar,
+    [invalidEngine],
+    [vehicleSchema, engineSchema],
+  );
+
+  assert.equal(result.ok, false);
+
+  if (!result.ok) {
+    assert.ok(
+      result.diagnostics.some(
+        (diagnostic) =>
+          diagnostic.code === "COMPONENT_SCHEMA_MISMATCH",
+      ),
+    );
+  }
+});
+
+test("nested components can contain further nested components", () => {
+  const transmissionSchema = {
+    name: "Transmission",
+    properties: {
+      gears: {
+        type: "number",
+        required: true,
+      },
+    },
+  };
+
+  const engineWithTransmissionSchema = {
+    name: "Engine",
+    properties: {
+      fuel: {
+        type: "string",
+        required: true,
+      },
+      horsepower: {
+        type: "number",
+        required: true,
+      },
+      transmission: {
+        type: "component",
+        schema: "Transmission",
+        required: true,
+      },
+    },
+  };
+
+  const transmission = {
+    name: "SixSpeed",
+    version: "1.0.0",
+    schema: "Transmission",
+    properties: {
+      gears: 6,
+    },
+  };
+
+  const engine = {
+    name: "PetrolEngineWithTransmission",
+    version: "1.0.0",
+    schema: "Engine",
+    properties: {
+      fuel: "petrol",
+      horsepower: 150,
+      transmission: {
+        name: "SixSpeed",
+        version: "1.0.0",
+        properties: {},
+      },
+    },
+  };
+
+  const result = compileComponent(
+    engineWithTransmissionSchema,
+    engine,
+    [transmission],
+    [engineWithTransmissionSchema, transmissionSchema],
+  );
+
+  assert.equal(result.ok, true);
+
+  if (result.ok) {
+    assert.deepEqual(
+      JSON.parse(result.json).properties.transmission,
+      {
+        name: "SixSpeed",
+        version: "1.0.0",
+        schema: "Transmission",
+        properties: {
+          gears: 6,
+        },
+      },
+    );
+  }
+});
