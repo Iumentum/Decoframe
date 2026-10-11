@@ -4,7 +4,6 @@
  */
 
 export type PropertyType = "string" | "number" | "boolean";
-
 export type PropertyValue = string | number | boolean;
 
 export interface PropertySchema {
@@ -18,10 +17,16 @@ export interface ComponentSchema {
   properties: Record<string, PropertySchema>;
 }
 
+export interface ComponentReference {
+  name: string;
+  version: string;
+}
+
 export interface ComponentDefinition {
   name: string;
   version: string;
   schema: string;
+  extends?: ComponentReference;
   properties: Record<string, unknown>;
 }
 
@@ -50,17 +55,12 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   );
 }
 
-function matchesType(
-  value: unknown,
-  type: PropertyType,
-): boolean {
+function matchesType(value: unknown, type: PropertyType): boolean {
   switch (type) {
     case "string":
       return typeof value === "string";
-
     case "number":
       return typeof value === "number" && Number.isFinite(value);
-
     case "boolean":
       return typeof value === "boolean";
   }
@@ -82,6 +82,126 @@ function canonicalize(value: unknown): unknown {
   }
 
   return value;
+}
+
+function identity(component: ComponentReference): string {
+  return JSON.stringify([component.name, component.version]);
+}
+
+function resolveInheritance(
+  component: ComponentDefinition,
+  registry: readonly ComponentDefinition[],
+  stack: readonly string[] = [],
+): {
+  properties?: Record<string, unknown>;
+  diagnostics: Diagnostic[];
+} {
+  const currentIdentity = identity(component);
+
+  if (stack.includes(currentIdentity)) {
+    return {
+      diagnostics: [
+        {
+          code: "INHERITANCE_CYCLE",
+          path: "extends",
+          message: `Inheritance cycle detected at "${component.name}@${component.version}".`,
+        },
+      ],
+    };
+  }
+
+  if (!isRecord(component.properties)) {
+    return {
+      diagnostics: [
+        {
+          code: "INVALID_PROPERTIES",
+          path: "properties",
+          message: "Component properties must be an object.",
+        },
+      ],
+    };
+  }
+
+  const nextStack = [...stack, currentIdentity];
+  let inheritedProperties: Record<string, unknown> = {};
+
+  if (component.extends !== undefined) {
+    const parentIdentity = identity(component.extends);
+
+    if (nextStack.includes(parentIdentity)) {
+      return {
+        diagnostics: [
+          {
+            code: "INHERITANCE_CYCLE",
+            path: "extends",
+            message: `Inheritance cycle detected involving "${component.extends.name}@${component.extends.version}".`,
+          },
+        ],
+      };
+    }
+
+    const matches = registry.filter(
+      (candidate) => identity(candidate) === parentIdentity,
+    );
+
+    if (matches.length === 0) {
+      return {
+        diagnostics: [
+          {
+            code: "PARENT_NOT_FOUND",
+            path: "extends",
+            message: `Parent "${component.extends.name}@${component.extends.version}" was not found.`,
+          },
+        ],
+      };
+    }
+
+    if (matches.length > 1) {
+      return {
+        diagnostics: [
+          {
+            code: "AMBIGUOUS_PARENT",
+            path: "extends",
+            message: `Multiple definitions match parent "${component.extends.name}@${component.extends.version}".`,
+          },
+        ],
+      };
+    }
+
+    const parent = matches[0]!;
+
+    if (parent.schema !== component.schema) {
+      return {
+        diagnostics: [
+          {
+            code: "INHERITANCE_SCHEMA_MISMATCH",
+            path: "extends",
+            message: `Parent schema "${parent.schema}" does not match child schema "${component.schema}".`,
+          },
+        ],
+      };
+    }
+
+    const resolvedParent = resolveInheritance(
+      parent,
+      registry,
+      nextStack,
+    );
+
+    if (resolvedParent.diagnostics.length > 0) {
+      return resolvedParent;
+    }
+
+    inheritedProperties = resolvedParent.properties!;
+  }
+
+  return {
+    properties: {
+      ...inheritedProperties,
+      ...component.properties,
+    },
+    diagnostics: [],
+  };
 }
 
 export function validateComponent(
@@ -146,7 +266,6 @@ export function validateComponent(
 
   for (const key of Object.keys(schema.properties).sort()) {
     const propertySchema = schema.properties[key]!;
-
     const supplied = Object.hasOwn(component.properties, key);
     const hasDefault = Object.hasOwn(propertySchema, "default");
 
@@ -170,8 +289,7 @@ export function validateComponent(
       diagnostics.push({
         code: "INVALID_PROPERTY_TYPE",
         path: `properties.${key}`,
-        message:
-          `Expected ${propertySchema.type} for property "${key}".`,
+        message: `Expected ${propertySchema.type} for property "${key}".`,
       });
     }
   }
@@ -182,8 +300,25 @@ export function validateComponent(
 export function compileComponent(
   schema: ComponentSchema,
   component: ComponentDefinition,
+  registry: readonly ComponentDefinition[] = [],
 ): CompileResult {
-  const diagnostics = validateComponent(schema, component);
+  const resolved = resolveInheritance(component, registry);
+
+  if (resolved.diagnostics.length > 0) {
+    return {
+      ok: false,
+      diagnostics: resolved.diagnostics,
+    };
+  }
+
+  const effectiveComponent: ComponentDefinition = {
+    name: component.name,
+    version: component.version,
+    schema: component.schema,
+    properties: resolved.properties!,
+  };
+
+  const diagnostics = validateComponent(schema, effectiveComponent);
 
   if (diagnostics.length > 0) {
     return { ok: false, diagnostics };
@@ -194,8 +329,8 @@ export function compileComponent(
   for (const key of Object.keys(schema.properties).sort()) {
     const propertySchema = schema.properties[key]!;
 
-    if (Object.hasOwn(component.properties, key)) {
-      properties[key] = component.properties[key] as PropertyValue;
+    if (Object.hasOwn(effectiveComponent.properties, key)) {
+      properties[key] = effectiveComponent.properties[key] as PropertyValue;
     } else if (Object.hasOwn(propertySchema, "default")) {
       properties[key] = propertySchema.default!;
     }
