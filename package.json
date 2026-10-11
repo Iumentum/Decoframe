@@ -1,0 +1,19 @@
+{
+  "name": "decoframe",
+  "version": "1.0.0",
+  "description": "Object-Oriented Declarative Composition Framework",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=24"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "check": "tsc --noEmit",
+    "test": "node --test"
+  },
+  "devDependencies": {
+    "@types/node": "^26.6.5",
+    "typescript": "^7.0.2"
+  }
+}
