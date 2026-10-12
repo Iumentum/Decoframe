@@ -759,6 +759,175 @@ test("instance array append preserves definition items", () => {
   }
 });
 
+test(
+  "instance $append extends a list inherited but not redefined by the definition",
+  () => {
+    const itemSchema = {
+      name: "TaggedItem",
+      properties: {
+        tags: {
+          type: "array",
+          items: { type: "string" },
+          required: true,
+        },
+      },
+    };
+
+    const containerSchema = {
+      name: "Container",
+      properties: {
+        item: {
+          type: "component",
+          schema: "TaggedItem",
+          required: true,
+        },
+      },
+    };
+
+    const registry = [
+      {
+        name: "BaseItem",
+        version: "1.0.0",
+        schema: "TaggedItem",
+        properties: {
+          tags: ["base-tag"],
+        },
+      },
+      {
+        name: "Car",
+        version: "1.0.0",
+        schema: "TaggedItem",
+        extends: {
+          name: "BaseItem",
+          version: "1.0.0",
+        },
+        properties: {},
+      },
+    ];
+
+    const component = {
+      name: "ExampleContainer",
+      version: "1.0.0",
+      schema: "Container",
+      properties: {
+        item: {
+          name: "Car",
+          version: "1.0.0",
+          properties: {
+            tags: {
+              $append: ["instance-tag"],
+            },
+          },
+        },
+      },
+    };
+
+    const result = compileComponent(
+      containerSchema,
+      component,
+      registry,
+      [containerSchema, itemSchema],
+    );
+
+    assert.equal(result.ok, true);
+
+    if (result.ok) {
+      assert.deepEqual(
+        JSON.parse(result.json).properties.item.properties.tags,
+        ["base-tag", "instance-tag"],
+      );
+    }
+  },
+);
+
+test(
+  "array layers apply defaults, inheritance, and instance overrides in order",
+  () => {
+    const itemSchema = {
+      name: "TaggedItem",
+      properties: {
+        tags: {
+          type: "array",
+          items: { type: "string" },
+          default: ["std"],
+          required: true,
+        },
+      },
+    };
+
+    const containerSchema = {
+      name: "Container",
+      properties: {
+        item: {
+          type: "component",
+          schema: "TaggedItem",
+          required: true,
+        },
+      },
+    };
+
+    const registry = [
+      {
+        name: "Base",
+        version: "1.0.0",
+        schema: "TaggedItem",
+        properties: {
+          tags: { $append: ["b"] },
+        },
+      },
+      {
+        name: "Mid",
+        version: "1.0.0",
+        schema: "TaggedItem",
+        extends: { name: "Base", version: "1.0.0" },
+        properties: {
+          tags: ["m"],
+        },
+      },
+      {
+        name: "Car",
+        version: "1.0.0",
+        schema: "TaggedItem",
+        extends: { name: "Mid", version: "1.0.0" },
+        properties: {
+          tags: { $append: ["c"] },
+        },
+      },
+    ];
+
+    const component = {
+      name: "ExampleContainer",
+      version: "1.0.0",
+      schema: "Container",
+      properties: {
+        item: {
+          name: "Car",
+          version: "1.0.0",
+          properties: {
+            tags: { $append: ["i"] },
+          },
+        },
+      },
+    };
+
+    const result = compileComponent(
+      containerSchema,
+      component,
+      registry,
+      [containerSchema, itemSchema],
+    );
+
+    assert.equal(result.ok, true);
+
+    if (result.ok) {
+      assert.deepEqual(
+        JSON.parse(result.json).properties.item.properties.tags,
+        ["m", "c", "i"],
+      );
+    }
+  },
+);
+
 test("child array properties replace inherited arrays", () => {
   const schema = {
     name: "TaggedItem",
@@ -2438,3 +2607,137 @@ test("nullable null overrides an object default", () => {
     settings: null,
   });
 });
+
+test(
+  "nested component definition with missing properties produces INVALID_PROPERTIES",
+  () => {
+    const itemSchema = {
+      name: "TaggedItem",
+      properties: {
+        tags: {
+          type: "array",
+          items: { type: "string" },
+        },
+      },
+    };
+
+    const containerSchema = {
+      name: "Container",
+      properties: {
+        item: {
+          type: "component",
+          schema: "TaggedItem",
+          required: true,
+        },
+      },
+    };
+
+    const registry = [
+      {
+        name: "BrokenItem",
+        version: "1.0.0",
+        schema: "TaggedItem",
+      },
+    ];
+
+    const component = {
+      name: "ExampleContainer",
+      version: "1.0.0",
+      schema: "Container",
+      properties: {
+        item: {
+          name: "BrokenItem",
+          version: "1.0.0",
+          properties: {},
+        },
+      },
+    };
+
+    const result = compileComponent(
+      containerSchema,
+      component,
+      registry,
+      [containerSchema, itemSchema],
+    );
+
+    assert.equal(result.ok, false);
+
+    if (!result.ok) {
+      assert.ok(
+        result.diagnostics.some(
+          (diagnostic) => diagnostic.code === "INVALID_PROPERTIES",
+        ),
+      );
+    }
+  },
+);
+
+test(
+  "nested component array item with null definition properties produces INVALID_PROPERTIES",
+  () => {
+    const itemSchema = {
+      name: "TaggedItem",
+      properties: {
+        tags: {
+          type: "array",
+          items: { type: "string" },
+        },
+      },
+    };
+
+    const containerSchema = {
+      name: "Container",
+      properties: {
+        items: {
+          type: "array",
+          items: {
+            type: "component",
+            schema: "TaggedItem",
+          },
+          required: true,
+        },
+      },
+    };
+
+    const registry = [
+      {
+        name: "BrokenItem",
+        version: "1.0.0",
+        schema: "TaggedItem",
+        properties: null,
+      },
+    ];
+
+    const component = {
+      name: "ExampleContainer",
+      version: "1.0.0",
+      schema: "Container",
+      properties: {
+        items: [
+          {
+            name: "BrokenItem",
+            version: "1.0.0",
+            properties: {},
+          },
+        ],
+      },
+    };
+
+    const result = compileComponent(
+      containerSchema,
+      component,
+      registry,
+      [containerSchema, itemSchema],
+    );
+
+    assert.equal(result.ok, false);
+
+    if (!result.ok) {
+      assert.ok(
+        result.diagnostics.some(
+          (diagnostic) => diagnostic.code === "INVALID_PROPERTIES",
+        ),
+      );
+    }
+  },
+);

@@ -238,6 +238,7 @@ function resolveInheritance(
   registry: readonly ComponentDefinition[],
   schema: ComponentSchema,
   stack: readonly string[] = [],
+  defaults: Record<string, unknown> = {},
 ): {
   properties?: Record<string, unknown>;
   diagnostics: Diagnostic[];
@@ -265,7 +266,7 @@ function resolveInheritance(
   }
 
   const nextStack = [...stack, currentIdentity];
-  let inheritedProperties: Record<string, unknown> = {};
+  let inheritedProperties: Record<string, unknown> = defaults;
 
   if (component.extends !== undefined) {
     const parentIdentity = identity(component.extends);
@@ -321,6 +322,7 @@ function resolveInheritance(
       registry,
       schema,
       nextStack,
+      defaults,
     );
 
     if (resolvedParent.diagnostics.length > 0) {
@@ -330,86 +332,21 @@ function resolveInheritance(
     inheritedProperties = resolvedParent.properties!;
   }
 
-  const properties: Record<string, unknown> = {};
+  const merged = mergeEffectiveProperties(
+    inheritedProperties,
+    component.properties,
+    schema,
+    "properties",
+  );
 
-  const setOwn = (
-    target: Record<string, unknown>,
-    key: string,
-    value: unknown,
-  ): void => {
-    Object.defineProperty(target, key, {
-      value,
-      enumerable: true,
-      configurable: true,
-      writable: true,
-    });
-  };
-
-  for (const key of Object.keys(inheritedProperties)) {
-    setOwn(properties, key, inheritedProperties[key]);
-  }
-
-  for (const key of Object.keys(component.properties)) {
-    const inheritedValue = Object.hasOwn(properties, key)
-      ? properties[key]
-      : undefined;
-    const overrideValue = component.properties[key];
-    const propertySchema = schema.properties[key];
-
-    if (propertySchema?.type === "array" && isRecord(overrideValue)) {
-      const operatorKeys = Object.keys(overrideValue);
-
-      if (
-        operatorKeys.length !== 1 ||
-        operatorKeys[0] !== "$append" ||
-        !Array.isArray(overrideValue.$append)
-      ) {
-        return {
-          diagnostics: [{
-            code: "INVALID_ARRAY_APPEND",
-            path: `properties.${key}`,
-            message:
-              `Array property "${key}" must use {$append: [...]} ` +
-              "with an array value.",
-          }],
-        };
-      }
-
-      if (
-        inheritedValue !== undefined &&
-        !Array.isArray(inheritedValue)
-      ) {
-        return {
-          diagnostics: [{
-            code: "INVALID_ARRAY_APPEND",
-            path: `properties.${key}`,
-            message:
-              `Cannot append to inherited non-array property "${key}".`,
-          }],
-        };
-      }
-
-      setOwn(properties, key, [
-        ...(Array.isArray(inheritedValue) ? inheritedValue : []),
-        ...overrideValue.$append,
-      ]);
-    } else if (
-      propertySchema?.type === "object" &&
-      isRecord(inheritedValue) &&
-      isRecord(overrideValue)
-    ) {
-      setOwn(
-        properties,
-        key,
-        mergeObjectValues(inheritedValue, overrideValue),
-      );
-    } else {
-      setOwn(properties, key, overrideValue);
-    }
+  if (merged.diagnostics.length > 0) {
+    return {
+      diagnostics: merged.diagnostics,
+    };
   }
 
   return {
-    properties,
+    properties: merged.properties,
     diagnostics: [],
   };
 }
@@ -829,6 +766,7 @@ function compileInternal(
   context: CompilationContext,
   componentStack: readonly string[],
   path: string,
+  instanceOverrides?: Record<string, unknown>,
 ): InternalCompileResult {
   const componentIdentity = identity(component);
   if (componentStack.includes(componentIdentity)) {
@@ -840,7 +778,30 @@ function compileInternal(
       }],
     };
   }
-  const resolved = resolveInheritance(component, registry, schema);
+
+  const propertiesWithDefaults: Record<string, unknown> = {};
+
+  for (const key of Object.keys(schema.properties)) {
+    const propertySchema = schema.properties[key]!;
+
+    if (Object.hasOwn(propertySchema, "default")) {
+      Object.defineProperty(propertiesWithDefaults, key, {
+        value: propertySchema.default,
+        enumerable: true,
+        configurable: true,
+        writable: true,
+      });
+    }
+  }
+
+  const resolved = resolveInheritance(
+    component,
+    registry,
+    schema,
+    [],
+    propertiesWithDefaults,
+  );
+
   if (resolved.diagnostics.length > 0) {
     return {
       diagnostics: resolved.diagnostics.map((diagnostic) => ({
@@ -851,7 +812,25 @@ function compileInternal(
       })),
     };
   }
-  const propertiesWithDefaults: Record<string, unknown> = {};
+
+  let effectiveProperties = resolved.properties!;
+
+  if (instanceOverrides !== undefined) {
+    const mergedInstance = mergeEffectiveProperties(
+      effectiveProperties,
+      instanceOverrides,
+      schema,
+      path ? `${path}.properties` : "properties",
+    );
+
+    if (mergedInstance.diagnostics.length > 0) {
+      return {
+        diagnostics: mergedInstance.diagnostics,
+      };
+    }
+
+    effectiveProperties = mergedInstance.properties;
+  }
 
   for (const key of Object.keys(schema.properties)) {
     const propertySchema = schema.properties[key]!;
@@ -873,13 +852,6 @@ function compileInternal(
     path ? `${path}.properties` : "properties",
   );
 
-  if (mergedDefaults.diagnostics.length > 0) {
-    return {
-      diagnostics: mergedDefaults.diagnostics,
-    };
-  }
-
-  const effectiveProperties = mergedDefaults.properties;
   const interpolationResult = resolveInterpolations(
     schema,
     effectiveProperties,
@@ -1043,30 +1015,15 @@ function compileInternal(
           });
           return;
         }
-        const nestedMerge = mergeEffectiveProperties(
-          definition.properties,
-          item.properties,
-          nestedSchemaMatches[0]!,
-          `${nestedPath}.properties`,
-        );
-
-        if (nestedMerge.diagnostics.length > 0) {
-          diagnostics.push(...nestedMerge.diagnostics);
-          return;
-        }
-
-        const nestedDefinition: ComponentDefinition = {
-          ...definition,
-          properties: nestedMerge.properties,
-        };
         const nestedResult = compileInternal(
           nestedSchemaMatches[0]!,
-          nestedDefinition,
+          definition,
           registry,
           schemas,
           context,
           nextStack,
           nestedPath,
+          item.properties,
         );
         if (nestedResult.diagnostics.length > 0) {
           diagnostics.push(...nestedResult.diagnostics);
@@ -1141,30 +1098,15 @@ function compileInternal(
       });
       continue;
     }
-    const nestedMerge = mergeEffectiveProperties(
-      definition.properties,
-      value.properties,
-      nestedSchemaMatches[0]!,
-      `${propertyPath}.properties`,
-    );
-
-    if (nestedMerge.diagnostics.length > 0) {
-      diagnostics.push(...nestedMerge.diagnostics);
-      continue;
-    }
-
-    const nestedDefinition: ComponentDefinition = {
-      ...definition,
-      properties: nestedMerge.properties,
-    };
     const nestedResult = compileInternal(
       nestedSchemaMatches[0]!,
-      nestedDefinition,
+      definition,
       registry,
       schemas,
       context,
       nextStack,
       propertyPath,
+      value.properties,
     );
     if (nestedResult.diagnostics.length > 0) {
       diagnostics.push(...nestedResult.diagnostics);
