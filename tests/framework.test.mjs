@@ -1345,6 +1345,44 @@ test("object properties preserve nested objects and arrays", () => {
   }
 });
 
+test("object properties preserve own __proto__ data", () => {
+  const schema = {
+    name: "Configuration",
+    properties: {
+      settings: {
+        type: "object",
+        required: true,
+      },
+    },
+  };
+
+  const settings = JSON.parse(
+    '{"__proto__":{"polluted":true},"enabled":true}',
+  );
+
+  const component = {
+    name: "AppConfig",
+    version: "1.0.0",
+    schema: "Configuration",
+    properties: { settings },
+  };
+
+  const result = compileComponent(schema, component);
+
+  assert.equal(result.ok, true);
+
+  if (result.ok) {
+    const output = JSON.parse(result.json).properties.settings;
+
+    assert.equal(
+      Object.hasOwn(output, "__proto__"),
+      true,
+    );
+    assert.deepEqual(output["__proto__"], { polluted: true });
+    assert.equal(output.enabled, true);
+  }
+});
+
 test("text interpolation resolves compilation context values", () => {
   const schema = {
     name: "Configuration",
@@ -2126,6 +2164,75 @@ test("compileComponent handles malformed runtime inputs without throwing", () =>
       assert.ok(result.diagnostics.length > 0);
     });
   }
+});
+
+test("compileComponent handles null parent references without throwing", () => {
+  const schema = {
+    name: "Vehicle",
+    properties: {},
+  };
+
+  const component = {
+    name: "Car",
+    version: "1.0.0",
+    schema: "Vehicle",
+    extends: null,
+    properties: {},
+  };
+
+  assert.doesNotThrow(() => {
+    const result = compileComponent(schema, component);
+
+    assert.equal(result.ok, false);
+
+    if (!result.ok) {
+      assert.ok(
+        result.diagnostics.some(
+          (diagnostic) => diagnostic.code === "INVALID_PARENT",
+        ),
+      );
+    }
+  });
+});
+
+test("compileComponent rejects malformed nested schemas without throwing", () => {
+  const schema = {
+    name: "Vehicle",
+    properties: {},
+  };
+
+  const component = {
+    name: "Car",
+    version: "1.0.0",
+    schema: "Vehicle",
+    properties: {},
+  };
+
+  const malformedNestedSchema = {
+    name: "Nested",
+    properties: null,
+  };
+
+  assert.doesNotThrow(() => {
+    const result = compileComponent(
+      schema,
+      component,
+      [],
+      [schema, malformedNestedSchema],
+    );
+
+    assert.equal(result.ok, false);
+
+    if (!result.ok) {
+      assert.ok(
+        result.diagnostics.some(
+          (diagnostic) =>
+            diagnostic.code === "INVALID_SCHEMA" &&
+            diagnostic.path === "schemas[1].properties",
+        ),
+      );
+    }
+  });
 });
 
 test("child recursively merges inherited object properties", () => {

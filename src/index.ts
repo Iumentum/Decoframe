@@ -87,6 +87,19 @@ function matchesType(value: unknown, type: PropertyType): boolean {
       );
   }
 }
+function setOwn(
+  target: Record<string, unknown>,
+  key: string,
+  value: unknown,
+): void {
+  Object.defineProperty(target, key, {
+    value,
+    enumerable: true,
+    configurable: true,
+    writable: true,
+  });
+}
+
 function canonicalize(value: unknown): unknown {
   if (Array.isArray(value)) {
     return value.map(canonicalize);
@@ -94,7 +107,7 @@ function canonicalize(value: unknown): unknown {
   if (isRecord(value)) {
     const result: Record<string, unknown> = {};
     for (const key of Object.keys(value).sort()) {
-      result[key] = canonicalize(value[key]);
+      setOwn(result, key, canonicalize(value[key]));
     }
     return result;
   }
@@ -108,19 +121,6 @@ function mergeObjectValues(
   overrides: Record<string, unknown>,
 ): Record<string, unknown> {
   const result: Record<string, unknown> = {};
-
-  const setOwn = (
-    target: Record<string, unknown>,
-    key: string,
-    value: unknown,
-  ): void => {
-    Object.defineProperty(target, key, {
-      value,
-      enumerable: true,
-      configurable: true,
-      writable: true,
-    });
-  };
 
   for (const key of Object.keys(inherited)) {
     setOwn(result, key, inherited[key]);
@@ -156,19 +156,6 @@ function mergeEffectiveProperties(
 } {
   const properties: Record<string, unknown> = {};
   const diagnostics: Diagnostic[] = [];
-
-  const setOwn = (
-    target: Record<string, unknown>,
-    key: string,
-    value: unknown,
-  ): void => {
-    Object.defineProperty(target, key, {
-      value,
-      enumerable: true,
-      configurable: true,
-      writable: true,
-    });
-  };
 
   for (const key of Object.keys(defaults)) {
     setOwn(properties, key, defaults[key]);
@@ -269,6 +256,16 @@ function resolveInheritance(
   let inheritedProperties: Record<string, unknown> = defaults;
 
   if (component.extends !== undefined) {
+    if (!isRecord(component.extends)) {
+      return {
+        diagnostics: [{
+          code: "INVALID_PARENT",
+          path: "extends",
+          message: "Component parent reference must be an object.",
+        }],
+      };
+    }
+
     const parentIdentity = identity(component.extends);
 
     if (nextStack.includes(parentIdentity)) {
@@ -566,10 +563,14 @@ function resolveInterpolations(
     if (isRecord(value)) {
       const result: Record<string, unknown> = {};
       for (const key of Object.keys(value).sort()) {
-        result[key] = resolveValue(
-          value[key],
-          undefined,
-          `${path}.${key}`,
+        setOwn(
+          result,
+          key,
+          resolveValue(
+            value[key],
+            undefined,
+            `${path}.${key}`,
+          ),
         );
       }
       return result;
@@ -1358,6 +1359,31 @@ export function compileComponent(
         path,
         message: `Invalid schema definition at "${path}".`,
       })),
+    };
+  }
+
+  const invalidNestedSchemaDiagnostics = validSchemas.flatMap(
+    (candidate, index) => {
+      if (candidate === validSchema) {
+        return [];
+      }
+
+      return getInvalidComponentSchemaPaths(candidate).map((path) => {
+        const nestedPath = `schemas[${index}].${path.replace(/^schema\./, "")}`;
+
+        return {
+          code: "INVALID_SCHEMA",
+          path: nestedPath,
+          message: `Invalid schema definition at "${nestedPath}".`,
+        };
+      });
+    },
+  );
+
+  if (invalidNestedSchemaDiagnostics.length > 0) {
+    return {
+      ok: false,
+      diagnostics: invalidNestedSchemaDiagnostics,
     };
   }
 
