@@ -1545,6 +1545,10 @@ function getInvalidComponentSchemaPaths(
       invalidPaths.push(`${path}.items`);
     }
 
+    if (property.type !== "array" && Object.hasOwn(property, "items")) {
+      invalidPaths.push(`${path}.items`);
+    }
+
     if (Object.hasOwn(property, "items")) {
       if (!isRecord(property.items)) {
         invalidPaths.push(`${path}.items`);

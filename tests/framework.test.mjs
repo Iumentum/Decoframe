@@ -3346,3 +3346,36 @@ test("JSON snapshot reports when validation diagnostics are suppressed", () => {
     "Further validation errors suppressed.",
   );
 });
+
+test("schema rejects items on non-array properties", () => {
+  const result = compileComponent(
+    {
+      name: "VehicleSchema",
+      properties: {
+        label: {
+          type: "string",
+          items: {
+            type: "string",
+          },
+        },
+      },
+    },
+    {
+      name: "Car",
+      version: "1.0.0",
+      schema: "VehicleSchema",
+      properties: {
+        label: "Car",
+      },
+    },
+  );
+
+  assert.equal(result.ok, false);
+  assert.ok(
+    result.diagnostics.some(
+      (diagnostic) =>
+        diagnostic.code === "INVALID_SCHEMA" &&
+        diagnostic.path === "schema.properties.label.items",
+    ),
+  );
+});
