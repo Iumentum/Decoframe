@@ -772,3 +772,210 @@ test("invalid array defaults produce indexed diagnostics", () => {
     );
   }
 });
+
+test("component references compile without embedding their targets", () => {
+  const schema = {
+    name: "Vehicle",
+    properties: {
+      engine: {
+        type: "reference",
+        schema: "Engine",
+        required: true,
+      },
+    },
+  };
+
+  const component = {
+    name: "Car",
+    version: "1.0.0",
+    schema: "Vehicle",
+    properties: {
+      engine: {
+        name: "PetrolEngine",
+        version: "1.0.0",
+      },
+    },
+  };
+
+  const result = compileComponent(schema, component, [petrolEngine]);
+
+  assert.equal(result.ok, true);
+
+  if (result.ok) {
+    assert.deepEqual(
+      JSON.parse(result.json).properties.engine,
+      {
+        name: "PetrolEngine",
+        version: "1.0.0",
+      },
+    );
+  }
+});
+
+test("missing component references produce a diagnostic", () => {
+  const schema = {
+    name: "Vehicle",
+    properties: {
+      engine: {
+        type: "reference",
+        schema: "Engine",
+        required: true,
+      },
+    },
+  };
+
+  const component = {
+    name: "Car",
+    version: "1.0.0",
+    schema: "Vehicle",
+    properties: {
+      engine: {
+        name: "MissingEngine",
+        version: "1.0.0",
+      },
+    },
+  };
+
+  const result = compileComponent(schema, component, []);
+
+  assert.equal(result.ok, false);
+
+  if (!result.ok) {
+    assert.ok(
+      result.diagnostics.some(
+        (diagnostic) =>
+          diagnostic.code === "COMPONENT_NOT_FOUND" &&
+          diagnostic.path === "properties.engine",
+      ),
+    );
+  }
+});
+
+test("references reject targets with incompatible schemas", () => {
+  const schema = {
+    name: "Vehicle",
+    properties: {
+      engine: {
+        type: "reference",
+        schema: "Engine",
+        required: true,
+      },
+    },
+  };
+
+  const wrongSchemaComponent = {
+    ...petrolEngine,
+    schema: "Transmission",
+  };
+
+  const component = {
+    name: "Car",
+    version: "1.0.0",
+    schema: "Vehicle",
+    properties: {
+      engine: {
+        name: "PetrolEngine",
+        version: "1.0.0",
+      },
+    },
+  };
+
+  const result = compileComponent(
+    schema,
+    component,
+    [wrongSchemaComponent],
+  );
+
+  assert.equal(result.ok, false);
+
+  if (!result.ok) {
+    assert.ok(
+      result.diagnostics.some(
+        (diagnostic) =>
+          diagnostic.code === "REFERENCE_SCHEMA_MISMATCH" &&
+          diagnostic.path === "properties.engine",
+      ),
+    );
+  }
+});
+
+test("ambiguous component references produce a diagnostic", () => {
+  const duplicateEngine = {
+    ...petrolEngine,
+  };
+
+  const referenceSchema = {
+    name: "Vehicle",
+    properties: {
+      engine: {
+        type: "reference",
+        required: true,
+      },
+    },
+  };
+
+  const vehicle = {
+    name: "Car",
+    version: "1.0.0",
+    schema: "Vehicle",
+    properties: {
+      engine: {
+        name: "PetrolEngine",
+        version: "1.0.0",
+      },
+    },
+  };
+
+  const result = compileComponent(
+    referenceSchema,
+    vehicle,
+    [petrolEngine, duplicateEngine],
+    [referenceSchema, engineSchema],
+  );
+
+  assert.ok(
+    result.diagnostics.some(
+      (diagnostic) => diagnostic.code === "AMBIGUOUS_COMPONENT",
+    ),
+  );
+});
+
+test("references without schema constraints accept any target schema", () => {
+  const referenceSchema = {
+    name: "Vehicle",
+    properties: {
+      engine: {
+        type: "reference",
+        required: true,
+      },
+    },
+  };
+
+  const vehicle = {
+    name: "Car",
+    version: "1.0.0",
+    schema: "Vehicle",
+    properties: {
+      engine: {
+        name: "PetrolEngine",
+        version: "1.0.0",
+      },
+    },
+  };
+
+  const result = compileComponent(
+    referenceSchema,
+    vehicle,
+    [petrolEngine],
+    [referenceSchema, engineSchema],
+  );
+
+  assert.deepEqual(result.diagnostics, []);
+  assert.deepEqual(
+    JSON.parse(result.json).properties.engine,
+    {
+      name: "PetrolEngine",
+      version: "1.0.0",
+    },
+  );
+});

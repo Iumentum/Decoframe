@@ -9,6 +9,7 @@ export type PropertyType =
   | "number"
   | "boolean"
   | "component"
+  | "reference"
   | "array";
 
 export interface PropertyItemSchema {
@@ -51,15 +52,8 @@ export interface Diagnostic {
 }
 
 export type CompileResult =
-  | {
-      ok: true;
-      json: string;
-      diagnostics: [];
-    }
-  | {
-      ok: false;
-      diagnostics: Diagnostic[];
-    };
+  | { ok: true; json: string; diagnostics: [] }
+  | { ok: false; diagnostics: Diagnostic[] };
 
 interface InternalCompileResult {
   output?: Record<string, unknown>;
@@ -84,6 +78,12 @@ function matchesType(value: unknown, type: PropertyType): boolean {
       return typeof value === "boolean";
     case "array":
       return Array.isArray(value);
+    case "reference":
+      return (
+        isRecord(value) &&
+        typeof value.name === "string" &&
+        typeof value.version === "string"
+      );
     case "component":
       return (
         isRecord(value) &&
@@ -420,6 +420,68 @@ function compileInternal(
       ? effectiveComponent.properties[key]
       : propertySchema.default;
 
+    const propertyPath = path
+      ? `${path}.properties.${key}`
+      : `properties.${key}`;
+
+    // References are resolved locally but remain lightweight identifiers.
+    if (propertySchema.type === "reference") {
+      if (!isRecord(value)) {
+        continue;
+      }
+
+      if (
+        typeof value.name !== "string" ||
+        typeof value.version !== "string"
+      ) {
+        continue;
+      }
+
+      const reference: ComponentReference = {
+        name: value.name,
+        version: value.version,
+      };
+
+      const matches = registry.filter(
+        (candidate) => identity(candidate) === identity(reference),
+      );
+
+      if (matches.length === 0) {
+        diagnostics.push({
+          code: "COMPONENT_NOT_FOUND",
+          path: propertyPath,
+          message: `Component "${reference.name}@${reference.version}" was not found.`,
+        });
+        continue;
+      }
+
+      if (matches.length > 1) {
+        diagnostics.push({
+          code: "AMBIGUOUS_COMPONENT",
+          path: propertyPath,
+          message: `Multiple definitions match "${reference.name}@${reference.version}".`,
+        });
+        continue;
+      }
+
+      const target = matches[0]!;
+
+      if (
+        propertySchema.schema !== undefined &&
+        target.schema !== propertySchema.schema
+      ) {
+        diagnostics.push({
+          code: "REFERENCE_SCHEMA_MISMATCH",
+          path: propertyPath,
+          message: `Expected schema "${propertySchema.schema}" but component "${reference.name}" uses "${target.schema}".`,
+        });
+        continue;
+      }
+
+      properties[key] = reference;
+      continue;
+    }
+
     if (propertySchema.type === "array") {
       if (!Array.isArray(value) || !propertySchema.items) {
         continue;
@@ -448,9 +510,7 @@ function compileInternal(
           return;
         }
 
-        const nestedPath = path
-          ? `${path}.properties.${key}[${index}]`
-          : `properties.${key}[${index}]`;
+        const nestedPath = `${propertyPath}[${index}]`;
 
         const matches = registry.filter(
           (candidate) =>
@@ -501,7 +561,9 @@ function compileInternal(
           diagnostics.push({
             code: "NESTED_SCHEMA_NOT_FOUND",
             path: nestedPath,
-            message: `Could not uniquely resolve schema "${definition.schema}".`,
+            message: nestedSchemaMatches.length === 0
+              ? `Schema "${definition.schema}" was not found.`
+              : `Multiple schemas are named "${definition.schema}".`,
           });
           return;
         }
@@ -540,7 +602,6 @@ function compileInternal(
     }
 
     if (!isRecord(value)) {
-      // validateComponent has already reported this invalid value.
       continue;
     }
 
@@ -564,14 +625,10 @@ function compileInternal(
       (candidate) => identity(candidate) === identity(reference),
     );
 
-    const nestedPath = path
-      ? `${path}.properties.${key}`
-      : `properties.${key}`;
-
     if (matches.length === 0) {
       diagnostics.push({
         code: "COMPONENT_NOT_FOUND",
-        path: nestedPath,
+        path: propertyPath,
         message: `Component "${referenceName}@${referenceVersion}" was not found.`,
       });
       continue;
@@ -580,7 +637,7 @@ function compileInternal(
     if (matches.length > 1) {
       diagnostics.push({
         code: "AMBIGUOUS_COMPONENT",
-        path: nestedPath,
+        path: propertyPath,
         message: `Multiple definitions match "${referenceName}@${referenceVersion}".`,
       });
       continue;
@@ -594,7 +651,7 @@ function compileInternal(
     ) {
       diagnostics.push({
         code: "COMPONENT_SCHEMA_MISMATCH",
-        path: nestedPath,
+        path: propertyPath,
         message: `Expected schema "${propertySchema.schema}" but component "${referenceName}" uses "${definition.schema}".`,
       });
       continue;
@@ -607,7 +664,7 @@ function compileInternal(
     if (nestedSchemaMatches.length !== 1) {
       diagnostics.push({
         code: "NESTED_SCHEMA_NOT_FOUND",
-        path: nestedPath,
+        path: propertyPath,
         message: nestedSchemaMatches.length === 0
           ? `Schema "${definition.schema}" was not found.`
           : `Multiple schemas are named "${definition.schema}".`,
@@ -629,7 +686,7 @@ function compileInternal(
       registry,
       schemas,
       nextStack,
-      nestedPath,
+      propertyPath,
     );
 
     if (nestedResult.diagnostics.length > 0) {
