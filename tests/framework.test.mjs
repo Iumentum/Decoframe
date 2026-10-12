@@ -1859,3 +1859,445 @@ test("compileComponent handles malformed runtime inputs without throwing", () =>
     });
   }
 });
+
+test("child recursively merges inherited object properties", () => {
+  const schema = {
+    name: "Configuration",
+    properties: {
+      settings: {
+        type: "object",
+        required: true,
+      },
+    },
+  };
+
+  const parent = {
+    name: "BaseConfig",
+    version: "1.0.0",
+    schema: "Configuration",
+    properties: {
+      settings: {
+        database: {
+          host: "localhost",
+          port: 5432,
+        },
+        features: ["search", "export"],
+      },
+    },
+  };
+
+  const child = {
+    name: "ProductionConfig",
+    version: "1.0.0",
+    schema: "Configuration",
+    extends: {
+      name: "BaseConfig",
+      version: "1.0.0",
+    },
+    properties: {
+      settings: {
+        database: {
+          host: "production.example",
+        },
+        features: ["search"],
+      },
+    },
+  };
+
+  const result = compileComponent(schema, child, [parent]);
+
+  assert.equal(result.ok, true);
+
+  if (result.ok) {
+    assert.deepEqual(JSON.parse(result.json).properties.settings, {
+      database: {
+        host: "production.example",
+        port: 5432,
+      },
+      features: ["search"],
+    });
+  }
+});
+
+test("child scalar replaces inherited object property", () => {
+  const schema = {
+    name: "Configuration",
+    properties: {
+      settings: {
+        type: "object",
+        required: true,
+      },
+    },
+  };
+
+  const parent = {
+    name: "BaseConfig",
+    version: "1.0.0",
+    schema: "Configuration",
+    properties: {
+      settings: {
+        database: {
+          host: "localhost",
+          port: 5432,
+        },
+      },
+    },
+  };
+
+  const child = {
+    name: "SimpleConfig",
+    version: "1.0.0",
+    schema: "Configuration",
+    extends: {
+      name: "BaseConfig",
+      version: "1.0.0",
+    },
+    properties: {
+      settings: "disabled",
+    },
+  };
+
+  const result = compileComponent(schema, child, [parent]);
+
+  assert.equal(result.ok, false);
+
+  if (!result.ok) {
+    assert.ok(result.diagnostics.length > 0);
+  }
+});
+
+test("child explicitly appends to inherited array properties", () => {
+  const schema = {
+    name: "TaggedItem",
+    properties: {
+      tags: {
+        type: "array",
+        items: { type: "string" },
+        required: true,
+      },
+    },
+  };
+
+  const parent = {
+    name: "BaseItem",
+    version: "1.0.0",
+    schema: "TaggedItem",
+    properties: {
+      tags: ["parent-tag", "shared-tag"],
+    },
+  };
+
+  const child = {
+    name: "SpecialItem",
+    version: "1.0.0",
+    schema: "TaggedItem",
+    extends: {
+      name: "BaseItem",
+      version: "1.0.0",
+    },
+    properties: {
+      tags: {
+        $append: ["child-tag"],
+      },
+    },
+  };
+
+  const result = compileComponent(schema, child, [parent]);
+
+  assert.equal(result.ok, true);
+
+  if (result.ok) {
+    assert.deepEqual(
+      JSON.parse(result.json).properties.tags,
+      ["parent-tag", "shared-tag", "child-tag"],
+    );
+  }
+});
+
+test("$append inside a free-form object remains ordinary data", () => {
+  const schema = {
+    name: "Configuration",
+    properties: {
+      settings: {
+        type: "object",
+        required: true,
+      },
+    },
+  };
+
+  const component = {
+    name: "AppConfig",
+    version: "1.0.0",
+    schema: "Configuration",
+    properties: {
+      settings: {
+        tags: {
+          $append: ["one", "two"],
+        },
+      },
+    },
+  };
+
+  const result = compileComponent(schema, component);
+
+  assert.equal(result.ok, true);
+
+  if (result.ok) {
+    assert.deepEqual(
+      JSON.parse(result.json).properties.settings,
+      {
+        tags: {
+          $append: ["one", "two"],
+        },
+      },
+    );
+  }
+});
+
+test("$append initializes an array when no inherited value exists", () => {
+  const schema = {
+    name: "TaggedItem",
+    properties: {
+      tags: {
+        type: "array",
+        items: { type: "string" },
+        required: true,
+      },
+    },
+  };
+
+  const component = {
+    name: "NewItem",
+    version: "1.0.0",
+    schema: "TaggedItem",
+    properties: {
+      tags: {
+        $append: ["first", "second"],
+      },
+    },
+  };
+
+  const result = compileComponent(schema, component);
+
+  assert.equal(result.ok, true);
+
+  if (result.ok) {
+    assert.deepEqual(
+      JSON.parse(result.json).properties.tags,
+      ["first", "second"],
+    );
+  }
+});
+
+test("$append rejects malformed array operators", () => {
+  const schema = {
+    name: "TaggedItem",
+    properties: {
+      tags: {
+        type: "array",
+        items: { type: "string" },
+      },
+    },
+  };
+
+  for (const invalidValue of [
+    { $append: "not-an-array" },
+    { $append: ["valid"], extra: true },
+    { $unknown: ["value"] },
+  ]) {
+    const component = {
+      name: "InvalidItem",
+      version: "1.0.0",
+      schema: "TaggedItem",
+      properties: {
+        tags: invalidValue,
+      },
+    };
+
+    const result = compileComponent(schema, component);
+
+    assert.equal(
+      result.ok,
+      false,
+      `Expected ${JSON.stringify(invalidValue)} to be rejected`,
+    );
+  }
+});
+
+test("ordinary child arrays replace inherited arrays", () => {
+  const schema = {
+    name: "TaggedItem",
+    properties: {
+      tags: {
+        type: "array",
+        items: { type: "string" },
+        required: true,
+      },
+    },
+  };
+
+  const parent = {
+    name: "BaseItem",
+    version: "1.0.0",
+    schema: "TaggedItem",
+    properties: {
+      tags: ["parent-tag"],
+    },
+  };
+
+  const child = {
+    name: "ChildItem",
+    version: "1.0.0",
+    schema: "TaggedItem",
+    extends: {
+      name: "BaseItem",
+      version: "1.0.0",
+    },
+    properties: {
+      tags: ["child-tag"],
+    },
+  };
+
+  const result = compileComponent(schema, child, [parent]);
+
+  assert.equal(result.ok, true);
+
+  if (result.ok) {
+    assert.deepEqual(
+      JSON.parse(result.json).properties.tags,
+      ["child-tag"],
+    );
+  }
+});
+
+test("$append items interpolate against final effective properties", () => {
+  const schema = {
+    name: "TaggedItem",
+    properties: {
+      label: {
+        type: "string",
+        required: true,
+      },
+      tags: {
+        type: "array",
+        items: { type: "string" },
+        required: true,
+      },
+    },
+  };
+
+  const parent = {
+    name: "BaseItem",
+    version: "1.0.0",
+    schema: "TaggedItem",
+    properties: {
+      label: "parent",
+      tags: ["inherited"],
+    },
+  };
+
+  const child = {
+    name: "ChildItem",
+    version: "1.0.0",
+    schema: "TaggedItem",
+    extends: {
+      name: "BaseItem",
+      version: "1.0.0",
+    },
+    properties: {
+      label: "child",
+      tags: {
+        $append: ["${value:property.label}"],
+      },
+    },
+  };
+
+  const result = compileComponent(schema, child, [parent]);
+
+  assert.equal(result.ok, true);
+
+  if (result.ok) {
+    assert.deepEqual(
+      JSON.parse(result.json).properties.tags,
+      ["inherited", "child"],
+    );
+  }
+});
+
+test("object defaults merge with inherited and child properties", () => {
+  const schema = {
+    name: "Test",
+    version: "1.0.0",
+    properties: {
+      settings: {
+        type: "object",
+        default: {
+          a: 1,
+          b: 2,
+          nested: {
+            x: 10,
+            y: 20,
+          },
+        },
+      },
+    },
+  };
+
+  const parent = {
+    name: "Parent",
+    version: "1.0.0",
+    schema: "Test",
+    properties: {
+      settings: {
+        b: 3,
+        nested: {
+          x: 30,
+        },
+      },
+    },
+  };
+
+  const child = {
+    name: "Child",
+    version: "1.0.0",
+    schema: "Test",
+    extends: {
+      name: "Parent",
+      version: "1.0.0",
+    },
+    properties: {
+      settings: {
+        c: 4,
+        nested: {
+          z: 40,
+        },
+      },
+    },
+  };
+
+  const result = compileComponent(schema, child, [parent, child]);
+
+  assert.equal(result.ok, true);
+
+  if (!result.ok) {
+    assert.fail(JSON.stringify(result.diagnostics));
+  }
+
+  assert.deepEqual(JSON.parse(result.json), {
+    name: "Child",
+    version: "1.0.0",
+    schema: "Test",
+    properties: {
+      settings: {
+        a: 1,
+        b: 3,
+        c: 4,
+        nested: {
+          x: 30,
+          y: 20,
+          z: 40,
+        },
+      },
+    },
+  });
+});

@@ -18,7 +18,8 @@ export type PropertyValue = string | number | boolean;
 export interface PropertySchema {
   type: PropertyType;
   required?: boolean;
-  default?: PropertyValue | unknown[] | Record<string, unknown>;
+  nullable?: boolean;
+  default?: PropertyValue | unknown[] | Record<string, unknown> | null;
   schema?: string;
   items?: PropertyItemSchema;
 }
@@ -102,15 +103,114 @@ function canonicalize(value: unknown): unknown {
 function identity(component: ComponentReference): string {
   return JSON.stringify([component.name, component.version]);
 }
+function mergeObjectValues(
+  inherited: Record<string, unknown>,
+  overrides: Record<string, unknown>,
+): Record<string, unknown> {
+  const result: Record<string, unknown> = {};
+
+  const setOwn = (
+    target: Record<string, unknown>,
+    key: string,
+    value: unknown,
+  ): void => {
+    Object.defineProperty(target, key, {
+      value,
+      enumerable: true,
+      configurable: true,
+      writable: true,
+    });
+  };
+
+  for (const key of Object.keys(inherited)) {
+    setOwn(result, key, inherited[key]);
+  }
+
+  for (const key of Object.keys(overrides)) {
+    const inheritedValue = Object.hasOwn(result, key)
+      ? result[key]
+      : undefined;
+    const overrideValue = overrides[key];
+
+    if (isRecord(inheritedValue) && isRecord(overrideValue)) {
+      setOwn(
+        result,
+        key,
+        mergeObjectValues(inheritedValue, overrideValue),
+      );
+    } else {
+      setOwn(result, key, overrideValue);
+    }
+  }
+
+  return result;
+}
+function mergeEffectiveProperties(
+  defaults: Record<string, unknown>,
+  overrides: Record<string, unknown>,
+  schema: ComponentSchema,
+  path: string,
+): {
+  properties: Record<string, unknown>;
+  diagnostics: Diagnostic[];
+} {
+  const properties: Record<string, unknown> = {};
+
+  const setOwn = (
+    target: Record<string, unknown>,
+    key: string,
+    value: unknown,
+  ): void => {
+    Object.defineProperty(target, key, {
+      value,
+      enumerable: true,
+      configurable: true,
+      writable: true,
+    });
+  };
+
+  for (const key of Object.keys(defaults)) {
+    setOwn(properties, key, defaults[key]);
+  }
+
+  for (const key of Object.keys(overrides)) {
+    const defaultValue = Object.hasOwn(properties, key)
+      ? properties[key]
+      : undefined;
+    const overrideValue = overrides[key];
+    const propertySchema = schema.properties[key];
+
+    if (
+      propertySchema?.type === "object" &&
+      isRecord(defaultValue) &&
+      isRecord(overrideValue)
+    ) {
+      setOwn(
+        properties,
+        key,
+        mergeObjectValues(defaultValue, overrideValue),
+      );
+    } else {
+      setOwn(properties, key, overrideValue);
+    }
+  }
+
+  return {
+    properties,
+    diagnostics: [],
+  };
+}
 function resolveInheritance(
   component: ComponentDefinition,
   registry: readonly ComponentDefinition[],
+  schema: ComponentSchema,
   stack: readonly string[] = [],
 ): {
   properties?: Record<string, unknown>;
   diagnostics: Diagnostic[];
 } {
   const currentIdentity = identity(component);
+
   if (stack.includes(currentIdentity)) {
     return {
       diagnostics: [{
@@ -120,6 +220,7 @@ function resolveInheritance(
       }],
     };
   }
+
   if (!isRecord(component.properties)) {
     return {
       diagnostics: [{
@@ -129,10 +230,13 @@ function resolveInheritance(
       }],
     };
   }
+
   const nextStack = [...stack, currentIdentity];
   let inheritedProperties: Record<string, unknown> = {};
+
   if (component.extends !== undefined) {
     const parentIdentity = identity(component.extends);
+
     if (nextStack.includes(parentIdentity)) {
       return {
         diagnostics: [{
@@ -142,9 +246,11 @@ function resolveInheritance(
         }],
       };
     }
+
     const matches = registry.filter(
       (candidate) => identity(candidate) === parentIdentity,
     );
+
     if (matches.length === 0) {
       return {
         diagnostics: [{
@@ -154,6 +260,7 @@ function resolveInheritance(
         }],
       };
     }
+
     if (matches.length > 1) {
       return {
         diagnostics: [{
@@ -163,7 +270,9 @@ function resolveInheritance(
         }],
       };
     }
+
     const parent = matches[0]!;
+
     if (parent.schema !== component.schema) {
       return {
         diagnostics: [{
@@ -173,21 +282,101 @@ function resolveInheritance(
         }],
       };
     }
+
     const resolvedParent = resolveInheritance(
       parent,
       registry,
+      schema,
       nextStack,
     );
+
     if (resolvedParent.diagnostics.length > 0) {
       return resolvedParent;
     }
+
     inheritedProperties = resolvedParent.properties!;
   }
+
+  const properties: Record<string, unknown> = {};
+
+  const setOwn = (
+    target: Record<string, unknown>,
+    key: string,
+    value: unknown,
+  ): void => {
+    Object.defineProperty(target, key, {
+      value,
+      enumerable: true,
+      configurable: true,
+      writable: true,
+    });
+  };
+
+  for (const key of Object.keys(inheritedProperties)) {
+    setOwn(properties, key, inheritedProperties[key]);
+  }
+
+  for (const key of Object.keys(component.properties)) {
+    const inheritedValue = Object.hasOwn(properties, key)
+      ? properties[key]
+      : undefined;
+    const overrideValue = component.properties[key];
+    const propertySchema = schema.properties[key];
+
+    if (propertySchema?.type === "array" && isRecord(overrideValue)) {
+      const operatorKeys = Object.keys(overrideValue);
+
+      if (
+        operatorKeys.length !== 1 ||
+        operatorKeys[0] !== "$append" ||
+        !Array.isArray(overrideValue.$append)
+      ) {
+        return {
+          diagnostics: [{
+            code: "INVALID_ARRAY_APPEND",
+            path: `properties.${key}`,
+            message:
+              `Array property "${key}" must use {$append: [...]} ` +
+              "with an array value.",
+          }],
+        };
+      }
+
+      if (
+        inheritedValue !== undefined &&
+        !Array.isArray(inheritedValue)
+      ) {
+        return {
+          diagnostics: [{
+            code: "INVALID_ARRAY_APPEND",
+            path: `properties.${key}`,
+            message:
+              `Cannot append to inherited non-array property "${key}".`,
+          }],
+        };
+      }
+
+      setOwn(properties, key, [
+        ...(Array.isArray(inheritedValue) ? inheritedValue : []),
+        ...overrideValue.$append,
+      ]);
+    } else if (
+      propertySchema?.type === "object" &&
+      isRecord(inheritedValue) &&
+      isRecord(overrideValue)
+    ) {
+      setOwn(
+        properties,
+        key,
+        mergeObjectValues(inheritedValue, overrideValue),
+      );
+    } else {
+      setOwn(properties, key, overrideValue);
+    }
+  }
+
   return {
-    properties: {
-      ...inheritedProperties,
-      ...component.properties,
-    },
+    properties,
     diagnostics: [],
   };
 }
@@ -614,7 +803,7 @@ function compileInternal(
       }],
     };
   }
-  const resolved = resolveInheritance(component, registry);
+  const resolved = resolveInheritance(component, registry, schema);
   if (resolved.diagnostics.length > 0) {
     return {
       diagnostics: resolved.diagnostics.map((diagnostic) => ({
@@ -625,21 +814,38 @@ function compileInternal(
       })),
     };
   }
-  const propertiesWithDefaults: Record<string, unknown> = {
-    ...resolved.properties!,
-  };
+  const propertiesWithDefaults: Record<string, unknown> = {};
+
   for (const key of Object.keys(schema.properties)) {
     const propertySchema = schema.properties[key]!;
-    if (
-      !Object.hasOwn(propertiesWithDefaults, key) &&
-      Object.hasOwn(propertySchema, "default")
-    ) {
-      propertiesWithDefaults[key] = propertySchema.default;
+
+    if (Object.hasOwn(propertySchema, "default")) {
+      Object.defineProperty(propertiesWithDefaults, key, {
+        value: propertySchema.default,
+        enumerable: true,
+        configurable: true,
+        writable: true,
+      });
     }
   }
+
+  const mergedDefaults = mergeEffectiveProperties(
+    propertiesWithDefaults,
+    resolved.properties!,
+    schema,
+    path ? `${path}.properties` : "properties",
+  );
+
+  if (mergedDefaults.diagnostics.length > 0) {
+    return {
+      diagnostics: mergedDefaults.diagnostics,
+    };
+  }
+
+  const effectiveProperties = mergedDefaults.properties;
   const interpolationResult = resolveInterpolations(
     schema,
-    propertiesWithDefaults,
+    effectiveProperties,
     context,
     path ? `${path}.properties` : "properties",
   );
@@ -973,7 +1179,21 @@ function getInvalidComponentSchemaPaths(
       invalidPaths.push(`${path}.required`);
     }
 
-    const allowedFields = ["type", "required", "default", "schema", "items"];
+    if (
+      Object.hasOwn(property, "nullable") &&
+      typeof property.nullable !== "boolean"
+    ) {
+      invalidPaths.push(`${path}.nullable`);
+    }
+
+    const allowedFields = [
+      "type",
+      "required",
+      "nullable",
+      "default",
+      "schema",
+      "items",
+    ];
 
     for (const field of Object.keys(property)) {
       if (!allowedFields.includes(field)) {
@@ -996,12 +1216,20 @@ function getInvalidComponentSchemaPaths(
       invalidPaths.push(`${path}.schema`);
     }
 
-    if (
-      validType &&
-      Object.hasOwn(property, "default") &&
-      !matchesType(property.default, property.type as PropertyType)
-    ) {
-      invalidPaths.push(`${path}.default`);
+    if (validType && Object.hasOwn(property, "default")) {
+      const defaultValue = property.default;
+      const nullable = property.nullable === true;
+
+      if (
+        defaultValue === null
+          ? !nullable
+          : !matchesType(
+              defaultValue,
+              property.type as PropertyType,
+            )
+      ) {
+        invalidPaths.push(`${path}.default`);
+      }
     }
 
     if (property.type === "array" && !Object.hasOwn(property, "items")) {
