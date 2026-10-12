@@ -831,27 +831,6 @@ function compileInternal(
 
     effectiveProperties = mergedInstance.properties;
   }
-
-  for (const key of Object.keys(schema.properties)) {
-    const propertySchema = schema.properties[key]!;
-
-    if (Object.hasOwn(propertySchema, "default")) {
-      Object.defineProperty(propertiesWithDefaults, key, {
-        value: propertySchema.default,
-        enumerable: true,
-        configurable: true,
-        writable: true,
-      });
-    }
-  }
-
-  const mergedDefaults = mergeEffectiveProperties(
-    propertiesWithDefaults,
-    resolved.properties!,
-    schema,
-    path ? `${path}.properties` : "properties",
-  );
-
   const interpolationResult = resolveInterpolations(
     schema,
     effectiveProperties,
@@ -894,6 +873,12 @@ function compileInternal(
     const propertyPath = path
       ? `${path}.properties.${key}`
       : `properties.${key}`;
+
+    if (value === null && propertySchema.nullable === true) {
+      properties[key] = null;
+      continue;
+    }
+
     // References are resolved locally but remain lightweight identifiers.
     if (propertySchema.type === "reference") {
       if (!isRecord(value)) {

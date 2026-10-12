@@ -928,6 +928,39 @@ test(
   },
 );
 
+test("instance $append preserves schema defaults when no definition overrides them", () => {
+  const schema = {
+    name: "TaggedItem",
+    version: "1.0.0",
+    properties: {
+      tags: {
+        type: "array",
+        items: { type: "string" },
+        default: ["std"],
+      },
+    },
+  };
+
+  const component = {
+    name: "Example",
+    version: "1.0.0",
+    schema: "TaggedItem",
+    properties: {
+      tags: { $append: ["i"] },
+    },
+  };
+
+  const result = compileComponent(schema, component);
+
+  assert.equal(result.ok, true);
+
+  if (!result.ok) {
+    assert.fail(JSON.stringify(result.diagnostics));
+  }
+
+  assert.deepEqual(JSON.parse(result.json).properties.tags, ["std", "i"]);
+});
+
 test("child array properties replace inherited arrays", () => {
   const schema = {
     name: "TaggedItem",
@@ -2605,6 +2638,53 @@ test("nullable null overrides an object default", () => {
 
   assert.deepEqual(JSON.parse(result.json).properties, {
     settings: null,
+  });
+});
+
+test("nullable null values are preserved for component, array, and reference properties", () => {
+  const schema = {
+    name: "NullableProperties",
+    version: "1.0.0",
+    properties: {
+      child: {
+        type: "component",
+        nullable: true,
+      },
+      items: {
+        type: "array",
+        nullable: true,
+        items: { type: "string" },
+      },
+      target: {
+        type: "reference",
+        nullable: true,
+      },
+    },
+  };
+
+  const component = {
+    name: "Example",
+    version: "1.0.0",
+    schema: "NullableProperties",
+    properties: {
+      child: null,
+      items: null,
+      target: null,
+    },
+  };
+
+  const result = compileComponent(schema, component);
+
+  assert.equal(result.ok, true);
+
+  if (!result.ok) {
+    assert.fail(JSON.stringify(result.diagnostics));
+  }
+
+  assert.deepEqual(JSON.parse(result.json).properties, {
+    child: null,
+    items: null,
+    target: null,
   });
 });
 
