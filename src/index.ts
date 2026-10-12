@@ -1051,7 +1051,94 @@ export function compileComponent(
   schemas: readonly ComponentSchema[] = [schema],
   context: CompilationContext = {},
 ): CompileResult {
-  const invalidSchemaPaths = getInvalidComponentSchemaPaths(schema);
+  if (!isRecord(schema)) {
+    return {
+      ok: false,
+      diagnostics: [
+        {
+          code: "INVALID_SCHEMA",
+          path: "schema",
+          message: "Schema definition must be an object.",
+        },
+      ],
+    };
+  }
+
+  if (!isRecord(component)) {
+    return {
+      ok: false,
+      diagnostics: [
+        {
+          code: "INVALID_COMPONENT",
+          path: "component",
+          message: "Component definition must be an object.",
+        },
+      ],
+    };
+  }
+
+  if (
+    !Array.isArray(registry) ||
+    !registry.every(
+      (item: unknown) =>
+        typeof item === "object" &&
+        item !== null &&
+        !Array.isArray(item),
+    )
+  ) {
+    return {
+      ok: false,
+      diagnostics: [
+        {
+          code: "INVALID_REGISTRY",
+          path: "registry",
+          message: "Component registry must be an array of component objects.",
+        },
+      ],
+    };
+  }
+
+  if (
+    !Array.isArray(schemas) ||
+    !schemas.every(
+      (item: unknown) =>
+        typeof item === "object" &&
+        item !== null &&
+        !Array.isArray(item),
+    )
+  ) {
+    return {
+      ok: false,
+      diagnostics: [
+        {
+          code: "INVALID_SCHEMAS",
+          path: "schemas",
+          message: "Schemas must be an array of schema objects.",
+        },
+      ],
+    };
+  }
+
+  if (!isRecord(context)) {
+    return {
+      ok: false,
+      diagnostics: [
+        {
+          code: "INVALID_CONTEXT",
+          path: "context",
+          message: "Compilation context must be an object.",
+        },
+      ],
+    };
+  }
+
+  const validSchema = schema as unknown as ComponentSchema;
+  const validComponent = component as unknown as ComponentDefinition;
+  const validRegistry = registry as readonly ComponentDefinition[];
+  const validSchemas = schemas as readonly ComponentSchema[];
+
+  const invalidSchemaPaths =
+    getInvalidComponentSchemaPaths(validSchema);
 
   if (invalidSchemaPaths.length > 0) {
     return {
@@ -1065,11 +1152,11 @@ export function compileComponent(
   }
 
   const result = compileInternal(
-    schema,
-    component,
-    registry,
-    schemas,
-    context,
+    validSchema,
+    validComponent,
+    validRegistry,
+    validSchemas,
+    context as CompilationContext,
     [],
     "",
   );
@@ -1080,6 +1167,7 @@ export function compileComponent(
       diagnostics: result.diagnostics,
     };
   }
+
   return {
     ok: true,
     json: JSON.stringify(canonicalize(result.output), null, 2),

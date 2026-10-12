@@ -1831,3 +1831,31 @@ test("validateComponent handles malformed schema inputs without throwing", () =>
     });
   }
 });
+
+test("compileComponent handles malformed runtime inputs without throwing", () => {
+  const schema = {
+    name: "Vehicle",
+    properties: {},
+  };
+
+  const component = {
+    name: "Car",
+    version: "1.0.0",
+    schema: "Vehicle",
+    properties: {},
+  };
+
+  for (const [inputSchema, inputComponent] of [
+    [null, component],
+    [{}, component],
+    [schema, null],
+    [schema, {}],
+  ]) {
+    assert.doesNotThrow(() => {
+      const result = compileComponent(inputSchema, inputComponent);
+      assert.equal(result.ok, false);
+      assert.ok(Array.isArray(result.diagnostics));
+      assert.ok(result.diagnostics.length > 0);
+    });
+  }
+});
