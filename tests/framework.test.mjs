@@ -1713,3 +1713,61 @@ test("invalid schema definitions report all invalid property paths", () => {
     invalidSchemaPaths.includes("schema.properties.capacity.required"),
   );
 });
+
+test("invalid top-level schema fields report precise paths", () => {
+  const schema = {
+    name: "",
+    properties: null,
+  };
+
+  const component = {
+    name: "Car",
+    version: "1.0.0",
+    schema: "Vehicle",
+    properties: {},
+  };
+
+  const result = compileComponent(schema, component, [], [schema]);
+
+  assert.equal(result.ok, false);
+
+  const invalidSchemaPaths = result.diagnostics
+    .filter((diagnostic) => diagnostic.code === "INVALID_SCHEMA")
+    .map((diagnostic) => diagnostic.path);
+
+  assert.ok(invalidSchemaPaths.includes("schema.name"));
+  assert.ok(invalidSchemaPaths.includes("schema.properties"));
+});
+
+test("invalid property definitions report precise paths", () => {
+  const schema = {
+    name: "Vehicle",
+    properties: {
+      speed: null,
+      capacity: {
+        type: "number",
+        default: "large",
+      },
+    },
+  };
+
+  const component = {
+    name: "Car",
+    version: "1.0.0",
+    schema: "Vehicle",
+    properties: {},
+  };
+
+  const result = compileComponent(schema, component, [], [schema]);
+
+  assert.equal(result.ok, false);
+
+  const invalidSchemaPaths = result.diagnostics
+    .filter((diagnostic) => diagnostic.code === "INVALID_SCHEMA")
+    .map((diagnostic) => diagnostic.path);
+
+  assert.ok(invalidSchemaPaths.includes("schema.properties.speed"));
+  assert.ok(
+    invalidSchemaPaths.includes("schema.properties.capacity.default"),
+  );
+});
