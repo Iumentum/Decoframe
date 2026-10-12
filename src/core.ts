@@ -103,6 +103,141 @@ function setOwn(
 const MAX_JSON_DEPTH = 100;
 const MAX_JSON_NODES = 1_000_000;
 const MAX_DIAGNOSTICS = 100;
+const RESOURCE_LIMIT_CODE = "RESOURCE_LIMIT_EXCEEDED";
+
+type ResourceBudget = {
+  workRemaining: number;
+  maxWork: number;
+  maxDepth: number;
+  interpolatedChars: number;
+  maxInterpolatedChars: number;
+  outputChars: number;
+  maxOutputChars: number;
+};
+
+class ResourceLimitError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "ResourceLimitError";
+  }
+}
+
+function consumeWork(budget: ResourceBudget, amount = 1): void {
+  if (amount > budget.workRemaining) {
+    throw new ResourceLimitError(
+      `Resource limit exceeded: maxWork of ${budget.maxWork} operations exceeded.`,
+    );
+  }
+
+  budget.workRemaining -= amount;
+}
+
+function consumeInterpolatedChars(
+  budget: ResourceBudget,
+  amount: number,
+): void {
+  if (amount > budget.maxInterpolatedChars - budget.interpolatedChars) {
+    throw new ResourceLimitError(
+      `Resource limit exceeded: maxInterpolatedChars of ${budget.maxInterpolatedChars} would be exceeded.`,
+    );
+  }
+
+  budget.interpolatedChars += amount;
+}
+
+function consumeOutputChars(budget: ResourceBudget, amount: number): void {
+  if (amount > budget.maxOutputChars - budget.outputChars) {
+    throw new ResourceLimitError(
+      `Resource limit exceeded: maxOutputChars of ${budget.maxOutputChars} would be exceeded.`,
+    );
+  }
+
+  budget.outputChars += amount;
+}
+
+export type Limits = {
+  maxSnapshotNodes: number;
+  maxSnapshotDepth: number;
+  maxWork: number;
+  maxDepth: number;
+  maxInterpolatedChars: number;
+  maxOutputChars: number;
+};
+
+export const DEFAULT_LIMITS: Readonly<Limits> = Object.freeze({
+  maxSnapshotNodes: 1_000_000,
+  maxSnapshotDepth: 100,
+  maxWork: 1_000_000,
+  maxDepth: 100,
+  maxInterpolatedChars: 10_000_000,
+  maxOutputChars: 10_000_000,
+});
+
+const LIMIT_KEYS = new Set<keyof Limits>([
+  "maxSnapshotNodes",
+  "maxSnapshotDepth",
+  "maxWork",
+  "maxDepth",
+  "maxInterpolatedChars",
+  "maxOutputChars",
+]);
+
+export function resolveLimits(
+  overrides?: Partial<Limits>,
+): Readonly<Limits> {
+  if (overrides === undefined) {
+    return DEFAULT_LIMITS;
+  }
+
+  if (
+    typeof overrides !== "object" ||
+    overrides === null ||
+    Array.isArray(overrides)
+  ) {
+    throw new TypeError("limits must be an object.");
+  }
+
+  const values: Partial<Limits> = {};
+
+  for (const key of Reflect.ownKeys(overrides)) {
+    if (typeof key !== "string" || !LIMIT_KEYS.has(key as keyof Limits)) {
+      throw new TypeError(`Unknown limits field "${String(key)}".`);
+    }
+
+    const value = overrides[key as keyof Limits];
+
+    if (value === undefined) {
+      continue;
+    }
+
+    if (!Number.isSafeInteger(value) || value <= 0) {
+      throw new TypeError(
+        `limits.${key} must be a positive safe integer.`,
+      );
+    }
+
+    Object.defineProperty(values, key, {
+      value,
+      enumerable: true,
+      configurable: true,
+      writable: true,
+    });
+  }
+
+  return Object.freeze({
+    maxSnapshotNodes:
+      values.maxSnapshotNodes ?? DEFAULT_LIMITS.maxSnapshotNodes,
+    maxSnapshotDepth:
+      values.maxSnapshotDepth ?? DEFAULT_LIMITS.maxSnapshotDepth,
+    maxWork: values.maxWork ?? DEFAULT_LIMITS.maxWork,
+    maxDepth: values.maxDepth ?? DEFAULT_LIMITS.maxDepth,
+    maxInterpolatedChars:
+      values.maxInterpolatedChars ??
+      DEFAULT_LIMITS.maxInterpolatedChars,
+    maxOutputChars:
+      values.maxOutputChars ?? DEFAULT_LIMITS.maxOutputChars,
+  });
+}
 
 type SnapshotResult =
   | { ok: true; value: unknown }
@@ -111,6 +246,7 @@ type SnapshotResult =
 type SnapshotBudget = {
   visited: number;
   maxNodes: number;
+  maxDepth: number;
 };
 
 function snapshotJsonSafeValue(
@@ -119,16 +255,21 @@ function snapshotJsonSafeValue(
   budget: SnapshotBudget = {
     visited: 0,
     maxNodes: MAX_JSON_NODES,
+    maxDepth: MAX_JSON_DEPTH,
   },
 ): SnapshotResult {
   const diagnostics: Diagnostic[] = [];
   const ancestors = new Set<object>();
   let exhausted = false;
 
-  function fail(currentPath: string, message: string): void {
+  function fail(
+    currentPath: string,
+    message: string,
+    code = "INVALID_JSON_VALUE",
+  ): void {
     if (diagnostics.length < MAX_DIAGNOSTICS) {
       diagnostics.push({
-        code: "INVALID_JSON_VALUE",
+        code,
         path: currentPath,
         message,
       });
@@ -137,7 +278,7 @@ function snapshotJsonSafeValue(
 
     exhausted = true;
     diagnostics[MAX_DIAGNOSTICS - 1] = {
-      code: "INVALID_JSON_VALUE",
+      code,
       path: currentPath,
       message: "Further validation errors suppressed.",
     };
@@ -183,10 +324,11 @@ function snapshotJsonSafeValue(
       return undefined;
     }
 
-    if (depth >= MAX_JSON_DEPTH) {
+    if (depth >= budget.maxDepth) {
       fail(
         currentPath,
-        `Maximum JSON nesting depth of ${MAX_JSON_DEPTH} exceeded at "${currentPath}".`,
+        `Maximum JSON nesting depth of ${budget.maxDepth} exceeded at "${currentPath}".`,
+        RESOURCE_LIMIT_CODE,
       );
       return undefined;
     }
@@ -217,6 +359,17 @@ function snapshotJsonSafeValue(
 
       const keys = Reflect.ownKeys(current);
       const descriptors = new Map<PropertyKey, PropertyDescriptor>();
+      const childCount = keys.length - (isArray ? 1 : 0);
+      const remainingNodes = budget.maxNodes - budget.visited;
+
+      if (childCount > remainingNodes) {
+        fail(
+          currentPath,
+          `Maximum JSON node budget of ${budget.maxNodes} exceeded.`,
+          RESOURCE_LIMIT_CODE,
+        );
+        return undefined;
+      }
 
       for (const key of keys) {
         const descriptor = Object.getOwnPropertyDescriptor(current, key);
@@ -378,6 +531,7 @@ function snapshotJsonSafeValue(
     fail(
       path,
       `Maximum JSON node budget of ${budget.maxNodes} exceeded at "${path}".`,
+      RESOURCE_LIMIT_CODE,
     );
   } else if (exhausted && diagnostics.length === 0) {
     fail(path, "Further validation errors suppressed.");
@@ -389,17 +543,42 @@ function snapshotJsonSafeValue(
 
   return { ok: true, value: snapshot };
 }
-function canonicalize(value: unknown): unknown {
-  if (Array.isArray(value)) {
-    return value.map(canonicalize);
+function canonicalize(
+  value: unknown,
+  budget: ResourceBudget,
+): unknown {
+  consumeWork(budget);
+
+  if (typeof value === "string") {
+    consumeOutputChars(budget, value.length);
+    return value;
   }
+
+  if (Array.isArray(value)) {
+    return value.map((item) => canonicalize(item, budget));
+  }
+
   if (isRecord(value)) {
-    const result: Record<string, unknown> = {};
-    for (const key of Object.keys(value).sort()) {
-      setOwn(result, key, canonicalize(value[key]));
+    const keys = Object.keys(value);
+
+    // Charge for processing keys before sorting or copying them.
+    consumeWork(budget, keys.length);
+
+    let keyChars = 0;
+    for (const key of keys) {
+      keyChars += key.length;
     }
+    consumeOutputChars(budget, keyChars);
+
+    const result: Record<string, unknown> = {};
+
+    for (const key of keys.sort()) {
+      setOwn(result, key, canonicalize(value[key], budget));
+    }
+
     return result;
   }
+
   return value;
 }
 function identity(component: ComponentReference): string {
@@ -408,14 +587,18 @@ function identity(component: ComponentReference): string {
 function mergeObjectValues(
   inherited: Record<string, unknown>,
   overrides: Record<string, unknown>,
+  budget: ResourceBudget,
 ): Record<string, unknown> {
   const result: Record<string, unknown> = {};
 
   for (const key of Object.keys(inherited)) {
+    consumeWork(budget);
     setOwn(result, key, inherited[key]);
   }
 
   for (const key of Object.keys(overrides)) {
+    consumeWork(budget);
+
     const inheritedValue = Object.hasOwn(result, key)
       ? result[key]
       : undefined;
@@ -425,7 +608,7 @@ function mergeObjectValues(
       setOwn(
         result,
         key,
-        mergeObjectValues(inheritedValue, overrideValue),
+        mergeObjectValues(inheritedValue, overrideValue, budget),
       );
     } else {
       setOwn(result, key, overrideValue);
@@ -439,6 +622,7 @@ function mergeEffectiveProperties(
   overrides: Record<string, unknown>,
   schema: ComponentSchema,
   path: string,
+  budget: ResourceBudget,
 ): {
   properties: Record<string, unknown>;
   diagnostics: Diagnostic[];
@@ -488,9 +672,16 @@ function mergeEffectiveProperties(
         continue;
       }
 
+      const inheritedItems = Array.isArray(inheritedValue)
+        ? inheritedValue
+        : [];
+      const appendedItems = overrideValue.$append;
+
+      consumeWork(budget, inheritedItems.length + appendedItems.length);
+
       setOwn(properties, key, [
-        ...(Array.isArray(inheritedValue) ? inheritedValue : []),
-        ...overrideValue.$append,
+        ...inheritedItems,
+        ...appendedItems,
       ]);
     } else if (
       propertySchema?.type === "object" &&
@@ -500,7 +691,7 @@ function mergeEffectiveProperties(
       setOwn(
         properties,
         key,
-        mergeObjectValues(inheritedValue, overrideValue),
+        mergeObjectValues(inheritedValue, overrideValue, budget),
       );
     } else {
       setOwn(properties, key, overrideValue);
@@ -513,6 +704,7 @@ function resolveInheritance(
   component: ComponentDefinition,
   registry: readonly ComponentDefinition[],
   schema: ComponentSchema,
+  budget: ResourceBudget,
   stack: readonly string[] = [],
   defaults: Record<string, unknown> = {},
 ): {
@@ -530,7 +722,11 @@ function resolveInheritance(
       }],
     };
   }
-
+  if (stack.length >= budget.maxDepth) {
+    throw new ResourceLimitError(
+      `Resource limit exceeded: maxDepth of ${budget.maxDepth} exceeded while resolving inheritance.`,
+    );
+  }
   if (!isRecord(component.properties)) {
     return {
       diagnostics: [{
@@ -607,6 +803,7 @@ function resolveInheritance(
       parent,
       registry,
       schema,
+      budget,
       nextStack,
       defaults,
     );
@@ -623,6 +820,7 @@ function resolveInheritance(
     component.properties,
     schema,
     "properties",
+    budget,
   );
 
   if (merged.diagnostics.length > 0) {
@@ -640,6 +838,7 @@ function resolveInterpolations(
   schema: ComponentSchema,
   sourceProperties: Record<string, unknown>,
   context: CompilationContext,
+  budget: ResourceBudget,
   basePath = "properties",
 ): {
   properties: Record<string, unknown>;
@@ -672,6 +871,7 @@ function resolveInterpolations(
     return current;
   }
   function resolveProperty(key: string): unknown {
+    consumeWork(budget);
     if (!Object.hasOwn(sourceProperties, key)) {
       return undefined;
     }
@@ -707,6 +907,7 @@ function resolveInterpolations(
     sourcePath: string,
     targetPath: string,
   ): unknown {
+    consumeWork(budget);
     const parts = sourcePath.split(".");
     const root = parts.shift()!;
     let value: unknown;
@@ -769,17 +970,30 @@ function resolveInterpolations(
     value: string,
     path: string,
   ): unknown {
+    const scanWork = Math.max(1, Math.ceil(value.length / 1024));
+    consumeWork(budget, scanWork);
+
     const expression =
       /^\$\{(value|object|text):(property|context)\.([^{}]+)\}$/;
     const exactMatch = value.match(expression);
     if (exactMatch) {
-      return resolveToken(
+      const replacement = resolveToken(
         exactMatch[1] as "value" | "object" | "text",
         exactMatch[2] as "property" | "context",
         exactMatch[3]!,
         path,
       );
+
+      if (
+        exactMatch[1] === "text" &&
+        typeof replacement === "string"
+      ) {
+        consumeInterpolatedChars(budget, replacement.length);
+      }
+
+      return replacement;
     }
+    consumeWork(budget, scanWork);
     if (!value.includes("${")) {
       return value;
     }
@@ -788,8 +1002,12 @@ function resolveInterpolations(
     let result = "";
     let lastIndex = 0;
     let match: RegExpExecArray | null;
+    consumeWork(budget, scanWork);
     while ((match = tokenPattern.exec(value)) !== null) {
+      const literalLength = match.index - lastIndex;
+      consumeInterpolatedChars(budget, literalLength);
       result += value.slice(lastIndex, match.index);
+
       const mode = match[1] as "value" | "object" | "text";
       if (mode !== "text") {
         diagnostic(
@@ -799,19 +1017,29 @@ function resolveInterpolations(
         );
         return value;
       }
+
       const replacement = resolveToken(
         mode,
         match[2] as "property" | "context",
         match[3]!,
         path,
       );
+
       if (replacement === undefined) {
         return undefined;
       }
-      result += replacement as string;
+
+      const replacementText = replacement as string;
+      consumeInterpolatedChars(budget, replacementText.length);
+      result += replacementText;
       lastIndex = match.index + match[0].length;
     }
+    consumeInterpolatedChars(budget, value.length - lastIndex);
     result += value.slice(lastIndex);
+    consumeWork(
+      budget,
+      Math.max(1, Math.ceil(result.length / 1024)),
+    );
     if (result.includes("${")) {
       diagnostic(
         "INVALID_INTERPOLATION",
@@ -827,6 +1055,7 @@ function resolveInterpolations(
     propertySchema: PropertySchema | undefined,
     path: string,
   ): unknown {
+    consumeWork(budget);
     // Nested component definitions are resolved by the compiler itself.
     // Keep their identity fields literal.
     if (
@@ -845,13 +1074,19 @@ function resolveInterpolations(
       ) {
         return value;
       }
+
+      consumeWork(budget, value.length);
+
       return value.map((item, index) =>
         resolveValue(item, undefined, `${path}[${index}]`),
       );
     }
     if (isRecord(value)) {
+      const keys = Object.keys(value);
+      consumeWork(budget, keys.length);
+
       const result: Record<string, unknown> = {};
-      for (const key of Object.keys(value).sort()) {
+      for (const key of keys.sort()) {
         setOwn(
           result,
           key,
@@ -866,9 +1101,14 @@ function resolveInterpolations(
     }
     return value;
   }
-  for (const key of Object.keys(sourceProperties).sort()) {
+
+  const sourceKeys = Object.keys(sourceProperties);
+  consumeWork(budget, sourceKeys.length);
+
+  for (const key of sourceKeys.sort()) {
     resolveProperty(key);
   }
+
   return { properties, diagnostics };
 }
 function validateComponentInternal(
@@ -1054,6 +1294,7 @@ function compileInternal(
   registry: readonly ComponentDefinition[],
   schemas: readonly ComponentSchema[],
   context: CompilationContext,
+  budget: ResourceBudget,
   componentStack: readonly string[],
   path: string,
   instanceOverrides?: Record<string, unknown>,
@@ -1069,9 +1310,18 @@ function compileInternal(
     };
   }
 
+  if (componentStack.length >= budget.maxDepth) {
+    throw new ResourceLimitError(
+      `Resource limit exceeded: maxDepth of ${budget.maxDepth} exceeded while compiling nested components.`,
+    );
+  }
+
+  consumeWork(budget);
+
   const propertiesWithDefaults: Record<string, unknown> = {};
 
   for (const key of Object.keys(schema.properties)) {
+    consumeWork(budget);
     const propertySchema = schema.properties[key]!;
 
     if (Object.hasOwn(propertySchema, "default")) {
@@ -1088,6 +1338,7 @@ function compileInternal(
     component,
     registry,
     schema,
+    budget,
     [],
     propertiesWithDefaults,
   );
@@ -1111,6 +1362,7 @@ function compileInternal(
       instanceOverrides,
       schema,
       path ? `${path}.properties` : "properties",
+      budget,
     );
 
     if (mergedInstance.diagnostics.length > 0) {
@@ -1125,6 +1377,7 @@ function compileInternal(
     schema,
     effectiveProperties,
     context,
+    budget,
     path ? `${path}.properties` : "properties",
   );
   if (interpolationResult.diagnostics.length > 0) {
@@ -1299,6 +1552,7 @@ function compileInternal(
           registry,
           schemas,
           context,
+          budget,
           nextStack,
           nestedPath,
           item.properties,
@@ -1382,6 +1636,7 @@ function compileInternal(
       registry,
       schemas,
       context,
+      budget,
       nextStack,
       propertyPath,
       value.properties,
@@ -1409,10 +1664,21 @@ export function validateComponent(
   schema: ComponentSchema,
   component: ComponentDefinition,
 ): Diagnostic[] {
-  const schemaSnapshot = snapshotJsonSafeValue(schema, "schema");
+  const budget: SnapshotBudget = {
+    visited: 0,
+    maxNodes: MAX_JSON_NODES,
+    maxDepth: MAX_JSON_DEPTH,
+  };
+
+  const schemaSnapshot = snapshotJsonSafeValue(
+    schema,
+    "schema",
+    budget,
+  );
   const componentSnapshot = snapshotJsonSafeValue(
     component,
     "component",
+    budget,
   );
 
   const diagnostics: Diagnostic[] = [];
@@ -1585,17 +1851,30 @@ function getInvalidComponentSchemaPaths(
 
   return invalidPaths;
 }
-function compileComponentInternal(
-  schema: ComponentSchema,
-  component: ComponentDefinition,
-  registry: readonly ComponentDefinition[] = [],
-  schemas: readonly ComponentSchema[] = [schema],
-  context: CompilationContext = {},
-  maxNodes = MAX_JSON_NODES,
+export type CompileComponentInternalOptions = {
+  schema: ComponentSchema;
+  component: ComponentDefinition;
+  registry?: readonly ComponentDefinition[];
+  schemas?: readonly ComponentSchema[];
+  context?: CompilationContext;
+  limits?: Partial<Limits>;
+};
+
+export function compileComponentInternal(
+  options: CompileComponentInternalOptions,
 ): CompileResult {
+  const limits = resolveLimits(options.limits);
+
+  const schema = options.schema;
+  const component = options.component;
+  const registry = options.registry ?? [];
+  const schemas = options.schemas ?? [schema];
+  const context = options.context ?? {};
+
   const budget: SnapshotBudget = {
     visited: 0,
-    maxNodes,
+    maxNodes: limits.maxSnapshotNodes,
+    maxDepth: limits.maxSnapshotDepth,
   };
 
   const snapshotInput = (value: unknown, path: string) =>
@@ -1763,28 +2042,54 @@ function compileComponentInternal(
     };
   }
 
-  const result = compileInternal(
-    validSchema,
-    validComponent,
-    validRegistry,
-    validSchemas,
-    validContext,
-    [],
-    "",
-  );
+  const resourceBudget: ResourceBudget = {
+    workRemaining: limits.maxWork,
+    maxWork: limits.maxWork,
+    maxDepth: limits.maxDepth,
+    interpolatedChars: 0,
+    maxInterpolatedChars: limits.maxInterpolatedChars,
+    outputChars: 0,
+    maxOutputChars: limits.maxOutputChars,
+  };
 
-  if (result.diagnostics.length > 0) {
+  try {
+    const result = compileInternal(
+      validSchema,
+      validComponent,
+      validRegistry,
+      validSchemas,
+      validContext,
+      resourceBudget,
+      [],
+      "",
+    );
+
+    if (result.diagnostics.length > 0) {
+      return {
+        ok: false,
+        diagnostics: result.diagnostics,
+      };
+    }
+
+    return {
+      ok: true,
+      json: JSON.stringify(canonicalize(result.output, resourceBudget), null, 2),
+      diagnostics: [],
+    };
+  } catch (error) {
+    if (!(error instanceof ResourceLimitError)) {
+      throw error;
+    }
+
     return {
       ok: false,
-      diagnostics: result.diagnostics,
+      diagnostics: [{
+        code: RESOURCE_LIMIT_CODE,
+        path: "",
+        message: error.message,
+      }],
     };
   }
-
-  return {
-    ok: true,
-    json: JSON.stringify(canonicalize(result.output), null, 2),
-    diagnostics: [],
-  };
 }
 export function compileComponent(
   schema: ComponentSchema,
@@ -1793,11 +2098,11 @@ export function compileComponent(
   schemas: readonly ComponentSchema[] = [schema],
   context: CompilationContext = {},
 ): CompileResult {
-  return compileComponentInternal(
+  return compileComponentInternal({
     schema,
     component,
     registry,
     schemas,
     context,
-  );
+  });
 }

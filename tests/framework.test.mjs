@@ -5,6 +5,9 @@ import {
   compileComponent,
   validateComponent,
 } from "../dist/index.js";
+import {
+  compileComponentInternal,
+} from "../dist/internal.js";
 
 const vehicleSchema = {
   name: "Vehicle",
@@ -1603,7 +1606,7 @@ test("compilation context rejects excessive nesting depth", () => {
     assert.ok(
       result.diagnostics.some(
         (diagnostic) =>
-          diagnostic.code === "INVALID_JSON_VALUE" &&
+          diagnostic.code === "RESOURCE_LIMIT_EXCEEDED" &&
           diagnostic.message.includes("Maximum JSON nesting depth"),
       ),
     );
@@ -3386,5 +3389,63 @@ test("public entry point exports only the public runtime functions", async () =>
   assert.deepEqual(
     Object.keys(api).sort(),
     ["compileComponent", "validateComponent"],
+  );
+});
+
+test("maxWork exhaustion returns RESOURCE_LIMIT_EXCEEDED", () => {
+  const result = compileComponentInternal({
+    schema: {
+      name: "TestSchema",
+      properties: {},
+    },
+    component: {
+      name: "TestComponent",
+      version: "1.0.0",
+      schema: "TestSchema",
+      properties: {},
+    },
+    limits: {
+      maxWork: 1,
+    },
+  });
+
+  assert.equal(result.ok, false);
+  assert.ok(
+    result.diagnostics.some(
+      (diagnostic) =>
+        diagnostic.code === "RESOURCE_LIMIT_EXCEEDED",
+    ),
+  );
+});
+
+test("maxInterpolatedChars exhaustion returns RESOURCE_LIMIT_EXCEEDED", () => {
+  const result = compileComponentInternal({
+    schema: {
+      name: "TestSchema",
+      properties: {
+        source: { type: "string" },
+        output: { type: "string" },
+      },
+    },
+    component: {
+      name: "TestComponent",
+      version: "1.0.0",
+      schema: "TestSchema",
+      properties: {
+        source: "123456",
+        output: "${text:property.source}",
+      },
+    },
+    limits: {
+      maxInterpolatedChars: 5,
+    },
+  });
+
+  assert.equal(result.ok, false);
+  assert.ok(
+    result.diagnostics.some(
+      (diagnostic) =>
+        diagnostic.code === "RESOURCE_LIMIT_EXCEEDED",
+    ),
   );
 });
