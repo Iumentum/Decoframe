@@ -1771,3 +1771,20 @@ test("invalid property definitions report precise paths", () => {
     invalidSchemaPaths.includes("schema.properties.capacity.default"),
   );
 });
+
+test("validateComponent handles malformed runtime inputs without throwing", () => {
+  const schema = {
+    name: "Vehicle",
+    properties: {
+      speed: {
+        type: "number",
+      },
+    },
+  };
+
+  assert.doesNotThrow(() => {
+    const diagnostics = validateComponent(schema, null);
+    assert.ok(Array.isArray(diagnostics));
+    assert.ok(diagnostics.length > 0);
+  });
+});

@@ -427,6 +427,14 @@ export function validateComponent(
   component: ComponentDefinition,
 ): Diagnostic[] {
   const diagnostics: Diagnostic[] = [];
+
+  if (!isRecord(component)) {
+    return [{
+      code: "INVALID_COMPONENT",
+      path: "component",
+      message: "Component definition must be an object.",
+    }];
+  }
   if (!schema.name.trim()) {
     diagnostics.push({
       code: "INVALID_SCHEMA_NAME",
