@@ -428,6 +428,16 @@ export function validateComponent(
 ): Diagnostic[] {
   const diagnostics: Diagnostic[] = [];
 
+  if (!isRecord(schema)) {
+    return [
+      {
+        code: "INVALID_SCHEMA",
+        path: "schema",
+        message: "Schema definition must be an object.",
+      },
+    ];
+  }
+
   if (!isRecord(component)) {
     return [
       {
@@ -444,6 +454,15 @@ export function validateComponent(
       path: "schema.name",
       message: "Schema name must not be empty.",
     });
+  }
+
+  if (!isRecord(schema.properties)) {
+    diagnostics.push({
+      code: "INVALID_SCHEMA_PROPERTIES",
+      path: "schema.properties",
+      message: "Schema properties must be an object.",
+    });
+    return diagnostics;
   }
 
   if (
@@ -484,7 +503,6 @@ export function validateComponent(
       path: "properties",
       message: "Component properties must be an object.",
     });
-
     return diagnostics;
   }
 
@@ -499,7 +517,17 @@ export function validateComponent(
   }
 
   for (const key of Object.keys(schema.properties).sort()) {
-    const propertySchema = schema.properties[key]!;
+    const propertySchema = schema.properties[key];
+
+    if (!isRecord(propertySchema)) {
+      diagnostics.push({
+        code: "INVALID_PROPERTY_SCHEMA",
+        path: `schema.properties.${key}`,
+        message: `Property schema "${key}" must be an object.`,
+      });
+      continue;
+    }
+
     const supplied = Object.hasOwn(component.properties, key);
     const hasDefault = Object.hasOwn(propertySchema, "default");
 
@@ -511,7 +539,6 @@ export function validateComponent(
           message: `Required property "${key}" is missing.`,
         });
       }
-
       continue;
     }
 
@@ -525,7 +552,6 @@ export function validateComponent(
         path: `properties.${key}`,
         message: `Expected ${propertySchema.type} for property "${key}".`,
       });
-
       continue;
     }
 
@@ -552,7 +578,6 @@ export function validateComponent(
           path: `properties.${key}`,
           message: `Array property "${key}" must declare an item schema.`,
         });
-
         continue;
       }
 
