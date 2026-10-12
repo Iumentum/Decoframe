@@ -3212,3 +3212,106 @@ test(
     }
   },
 );
+
+test("compileComponent does not throw when component schema is an object", () => {
+  assert.doesNotThrow(() => {
+    compileComponent(
+      { name: "Vehicle", properties: {} },
+      {
+        name: "Car",
+        version: "1.0.0",
+        schema: {},
+        properties: {},
+      },
+    );
+  });
+});
+
+test("compileComponent does not reread the original schemas array after snapshotting", () => {
+  const schema = {
+    name: "VehicleSchema",
+    properties: {},
+  };
+
+  const schemas = new Proxy([schema], {
+    get(target, property, receiver) {
+      if (property === "0") {
+        throw new Error("Original schemas array was read");
+      }
+
+      return Reflect.get(target, property, receiver);
+    },
+  });
+
+  const result = compileComponent(
+    schema,
+    {
+      name: "Car",
+      version: "1.0.0",
+      schema: "VehicleSchema",
+      properties: {},
+    },
+    [],
+    schemas,
+    {},
+  );
+
+  assert.equal(result.ok, true);
+});
+
+test("validateComponent snapshots inputs before inspecting properties", () => {
+  const component = {
+    version: "1.0.0",
+    schema: "VehicleSchema",
+    properties: {},
+  };
+
+  Object.defineProperty(component, "name", {
+    enumerable: true,
+    get() {
+      throw new Error("Getter must not execute");
+    },
+  });
+
+  assert.doesNotThrow(() => {
+    const diagnostics = validateComponent(
+      {
+        name: "VehicleSchema",
+        properties: {},
+      },
+      component,
+    );
+
+    assert.ok(
+      diagnostics.some(
+        (diagnostic) => diagnostic.code === "INVALID_JSON_VALUE",
+      ),
+    );
+  });
+});
+
+test("definition-level __proto__ is reported as an unknown property", () => {
+  const properties = JSON.parse('{"__proto__":"unexpected"}');
+
+  const result = compileComponent(
+    {
+      name: "VehicleSchema",
+      properties: {},
+    },
+    {
+      name: "Car",
+      version: "1.0.0",
+      schema: "VehicleSchema",
+      properties,
+    },
+  );
+
+  assert.equal(result.ok, false);
+  assert.ok(
+    result.diagnostics.some(
+      (diagnostic) =>
+        diagnostic.code === "UNKNOWN_PROPERTY" &&
+        diagnostic.path === "properties.__proto__",
+    ),
+  );
+});

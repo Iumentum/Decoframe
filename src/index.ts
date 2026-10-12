@@ -108,14 +108,21 @@ type SnapshotResult =
   | { ok: true; value: unknown }
   | { ok: false; diagnostics: Diagnostic[] };
 
+type SnapshotBudget = {
+  visited: number;
+  maxNodes: number;
+};
+
 function snapshotJsonSafeValue(
   value: unknown,
   path: string,
-  maxNodes = MAX_JSON_NODES,
+  budget: SnapshotBudget = {
+    visited: 0,
+    maxNodes: MAX_JSON_NODES,
+  },
 ): SnapshotResult {
   const diagnostics: Diagnostic[] = [];
   const ancestors = new Set<object>();
-  let visited = 0;
   let exhausted = false;
 
   function fail(currentPath: string, message: string): void {
@@ -135,9 +142,9 @@ function snapshotJsonSafeValue(
     currentPath: string,
     depth: number,
   ): unknown {
-    visited += 1;
+    budget.visited += 1;
 
-    if (visited > maxNodes) {
+    if (budget.visited > budget.maxNodes) {
       exhausted = true;
       return undefined;
     }
@@ -221,7 +228,7 @@ function snapshotJsonSafeValue(
 
       const result: unknown[] | Record<string, unknown> = isArray
         ? []
-        : Object.create(null) as Record<string, unknown>;
+        : {};
 
       ancestors.add(current);
 
@@ -361,10 +368,10 @@ function snapshotJsonSafeValue(
     fail(path, `Unable to inspect the value at "${path}".`);
   }
 
-  if (visited > maxNodes) {
+  if (budget.visited > budget.maxNodes) {
     fail(
       path,
-      `Maximum JSON node budget of ${maxNodes} exceeded at "${path}".`,
+      `Maximum JSON node budget of ${budget.maxNodes} exceeded at "${path}".`,
     );
   } else if (exhausted && diagnostics.length === 0) {
     fail(path, "Further validation errors suppressed.");
@@ -376,19 +383,6 @@ function snapshotJsonSafeValue(
 
   return { ok: true, value: snapshot };
 }
-
-function validateJsonSafeValue(
-  value: unknown,
-  path: string,
-  diagnostics: Diagnostic[],
-): void {
-  const result = snapshotJsonSafeValue(value, path);
-
-  if (!result.ok) {
-    diagnostics.push(...result.diagnostics);
-  }
-}
-
 function canonicalize(value: unknown): unknown {
   if (Array.isArray(value)) {
     return value.map(canonicalize);
@@ -698,7 +692,7 @@ function resolveInterpolations(
     );
     resolving.delete(key);
     resolved.add(key);
-    properties[key] = value;
+    setOwn(properties, key, value);
     return value;
   }
   function resolveToken(
@@ -871,7 +865,7 @@ function resolveInterpolations(
   }
   return { properties, diagnostics };
 }
-export function validateComponent(
+function validateComponentInternal(
   schema: ComponentSchema,
   component: ComponentDefinition,
 ): Diagnostic[] {
@@ -1138,7 +1132,10 @@ function compileInternal(
     schema: component.schema,
     properties: interpolationResult.properties,
   };
-  const diagnostics = validateComponent(schema, effectiveComponent);
+  const diagnostics = validateComponentInternal(
+    schema,
+    effectiveComponent,
+  );
   if (diagnostics.length > 0) {
     return {
       diagnostics: diagnostics.map((diagnostic) => ({
@@ -1402,6 +1399,35 @@ function compileInternal(
     diagnostics: [],
   };
 }
+export function validateComponent(
+  schema: ComponentSchema,
+  component: ComponentDefinition,
+): Diagnostic[] {
+  const schemaSnapshot = snapshotJsonSafeValue(schema, "schema");
+  const componentSnapshot = snapshotJsonSafeValue(
+    component,
+    "component",
+  );
+
+  const diagnostics: Diagnostic[] = [];
+
+  if (!schemaSnapshot.ok) {
+    diagnostics.push(...schemaSnapshot.diagnostics);
+  }
+
+  if (!componentSnapshot.ok) {
+    diagnostics.push(...componentSnapshot.diagnostics);
+  }
+
+  if (!schemaSnapshot.ok || !componentSnapshot.ok) {
+    return diagnostics;
+  }
+
+  return validateComponentInternal(
+    schemaSnapshot.value as ComponentSchema,
+    componentSnapshot.value as ComponentDefinition,
+  );
+}
 function getInvalidComponentSchemaPaths(
   schema: unknown,
 ): string[] {
@@ -1504,18 +1530,7 @@ function getInvalidComponentSchemaPaths(
               property.type as PropertyType,
             );
 
-      const defaultDiagnostics: Diagnostic[] = [];
-
-      validateJsonSafeValue(
-        defaultValue,
-        `${path}.default`,
-        defaultDiagnostics,
-      );
-
-      if (
-        !validDefaultType ||
-        defaultDiagnostics.length > 0
-      ) {
+      if (!validDefaultType) {
         invalidPaths.push(`${path}.default`);
       }
     }
@@ -1560,17 +1575,23 @@ function getInvalidComponentSchemaPaths(
 
   return invalidPaths;
 }
-export function compileComponent(
+function compileComponentInternal(
   schema: ComponentSchema,
   component: ComponentDefinition,
   registry: readonly ComponentDefinition[] = [],
   schemas: readonly ComponentSchema[] = [schema],
   context: CompilationContext = {},
+  maxNodes = MAX_JSON_NODES,
 ): CompileResult {
+  const budget: SnapshotBudget = {
+    visited: 0,
+    maxNodes,
+  };
+
   const snapshotInput = (value: unknown, path: string) =>
     value === undefined
       ? { ok: true as const, value }
-      : snapshotJsonSafeValue(value, path);
+      : snapshotJsonSafeValue(value, path, budget);
 
   const schemaSnapshot = snapshotInput(schema, "schema");
   const componentSnapshot = snapshotInput(component, "component");
@@ -1697,11 +1718,6 @@ export function compileComponent(
     };
   }
 
-  const identityPreservingSchemas = validSchemas.map(
-    (candidate, index) =>
-      schemas[index] === schema ? validSchema : candidate,
-  );
-
   const invalidSchemaPaths =
     getInvalidComponentSchemaPaths(validSchema);
 
@@ -1717,12 +1733,8 @@ export function compileComponent(
   }
 
   const invalidNestedSchemaDiagnostics =
-    identityPreservingSchemas.flatMap((candidate, index) => {
-      if (candidate === validSchema) {
-        return [];
-      }
-
-      return getInvalidComponentSchemaPaths(candidate).map((path) => {
+    validSchemas.flatMap((candidate, index) =>
+      getInvalidComponentSchemaPaths(candidate).map((path) => {
         const nestedPath =
           `schemas[${index}].${path.replace(/^schema\./, "")}`;
 
@@ -1731,8 +1743,8 @@ export function compileComponent(
           path: nestedPath,
           message: `Invalid schema definition at "${nestedPath}".`,
         };
-      });
-    });
+      }),
+    );
 
   if (invalidNestedSchemaDiagnostics.length > 0) {
     return {
@@ -1745,7 +1757,7 @@ export function compileComponent(
     validSchema,
     validComponent,
     validRegistry,
-    identityPreservingSchemas,
+    validSchemas,
     validContext,
     [],
     "",
@@ -1763,4 +1775,19 @@ export function compileComponent(
     json: JSON.stringify(canonicalize(result.output), null, 2),
     diagnostics: [],
   };
+}
+export function compileComponent(
+  schema: ComponentSchema,
+  component: ComponentDefinition,
+  registry: readonly ComponentDefinition[] = [],
+  schemas: readonly ComponentSchema[] = [schema],
+  context: CompilationContext = {},
+): CompileResult {
+  return compileComponentInternal(
+    schema,
+    component,
+    registry,
+    schemas,
+    context,
+  );
 }
