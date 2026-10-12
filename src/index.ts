@@ -132,9 +132,15 @@ function snapshotJsonSafeValue(
         path: currentPath,
         message,
       });
-    } else {
-      exhausted = true;
+      return;
     }
+
+    exhausted = true;
+    diagnostics[MAX_DIAGNOSTICS - 1] = {
+      code: "INVALID_JSON_VALUE",
+      path: currentPath,
+      message: "Further validation errors suppressed.",
+    };
   }
 
   function copy(

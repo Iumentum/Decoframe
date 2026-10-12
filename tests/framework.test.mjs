@@ -3315,3 +3315,34 @@ test("definition-level __proto__ is reported as an unknown property", () => {
     ),
   );
 });
+
+test("JSON snapshot reports when validation diagnostics are suppressed", () => {
+  const context = {};
+
+  for (let index = 0; index < 101; index += 1) {
+    context[`invalid${index}`] = 1n;
+  }
+
+  const result = compileComponent(
+    {
+      name: "VehicleSchema",
+      properties: {},
+    },
+    {
+      name: "Car",
+      version: "1.0.0",
+      schema: "VehicleSchema",
+      properties: {},
+    },
+    [],
+    undefined,
+    context,
+  );
+
+  assert.equal(result.ok, false);
+  assert.equal(result.diagnostics.length, 100);
+  assert.equal(
+    result.diagnostics.at(-1).message,
+    "Further validation errors suppressed.",
+  );
+});
