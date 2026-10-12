@@ -8,15 +8,22 @@ export type PropertyType =
   | "string"
   | "number"
   | "boolean"
-  | "component";
+  | "component"
+  | "array";
+
+export interface PropertyItemSchema {
+  type: "string" | "number" | "boolean" | "component";
+  schema?: string;
+}
 
 export type PropertyValue = string | number | boolean;
 
 export interface PropertySchema {
   type: PropertyType;
   required?: boolean;
-  default?: PropertyValue;
+  default?: PropertyValue | unknown[];
   schema?: string;
+  items?: PropertyItemSchema;
 }
 
 export interface ComponentSchema {
@@ -75,6 +82,8 @@ function matchesType(value: unknown, type: PropertyType): boolean {
       return typeof value === "number" && Number.isFinite(value);
     case "boolean":
       return typeof value === "boolean";
+    case "array":
+      return Array.isArray(value);
     case "component":
       return (
         isRecord(value) &&
@@ -315,6 +324,29 @@ export function validateComponent(
         message: `Expected nested component schema "${propertySchema.schema}".`,
       });
     }
+
+    if (propertySchema.type === "array" && Array.isArray(value)) {
+      const itemSchema = propertySchema.items;
+
+      if (!itemSchema) {
+        diagnostics.push({
+          code: "MISSING_ARRAY_ITEM_SCHEMA",
+          path: `properties.${key}`,
+          message: `Array property "${key}" must declare an item schema.`,
+        });
+        continue;
+      }
+
+      value.forEach((item, index) => {
+        if (!matchesType(item, itemSchema.type)) {
+          diagnostics.push({
+            code: "INVALID_ARRAY_ITEM",
+            path: `properties.${key}[${index}]`,
+            message: `Expected ${itemSchema.type} for array item.`,
+          });
+        }
+      });
+    }
   }
 
   return diagnostics;
@@ -387,6 +419,120 @@ function compileInternal(
     const value = supplied
       ? effectiveComponent.properties[key]
       : propertySchema.default;
+
+    if (propertySchema.type === "array") {
+      if (!Array.isArray(value) || !propertySchema.items) {
+        continue;
+      }
+
+      const compiledItems: unknown[] = [];
+
+      value.forEach((item, index) => {
+        if (propertySchema.items!.type !== "component") {
+          compiledItems.push(item);
+          return;
+        }
+
+        if (!isRecord(item)) {
+          return;
+        }
+
+        const referenceName = item.name;
+        const referenceVersion = item.version;
+
+        if (
+          typeof referenceName !== "string" ||
+          typeof referenceVersion !== "string" ||
+          !isRecord(item.properties)
+        ) {
+          return;
+        }
+
+        const nestedPath = path
+          ? `${path}.properties.${key}[${index}]`
+          : `properties.${key}[${index}]`;
+
+        const matches = registry.filter(
+          (candidate) =>
+            identity(candidate) ===
+            identity({
+              name: referenceName,
+              version: referenceVersion,
+            }),
+        );
+
+        if (matches.length === 0) {
+          diagnostics.push({
+            code: "COMPONENT_NOT_FOUND",
+            path: nestedPath,
+            message: `Component "${referenceName}@${referenceVersion}" was not found.`,
+          });
+          return;
+        }
+
+        if (matches.length > 1) {
+          diagnostics.push({
+            code: "AMBIGUOUS_COMPONENT",
+            path: nestedPath,
+            message: `Multiple definitions match "${referenceName}@${referenceVersion}".`,
+          });
+          return;
+        }
+
+        const definition = matches[0]!;
+
+        if (
+          propertySchema.items!.schema !== undefined &&
+          definition.schema !== propertySchema.items!.schema
+        ) {
+          diagnostics.push({
+            code: "COMPONENT_SCHEMA_MISMATCH",
+            path: nestedPath,
+            message: `Expected schema "${propertySchema.items!.schema}" but component "${referenceName}" uses "${definition.schema}".`,
+          });
+          return;
+        }
+
+        const nestedSchemaMatches = schemas.filter(
+          (candidate) => candidate.name === definition.schema,
+        );
+
+        if (nestedSchemaMatches.length !== 1) {
+          diagnostics.push({
+            code: "NESTED_SCHEMA_NOT_FOUND",
+            path: nestedPath,
+            message: `Could not uniquely resolve schema "${definition.schema}".`,
+          });
+          return;
+        }
+
+        const nestedDefinition: ComponentDefinition = {
+          ...definition,
+          properties: {
+            ...definition.properties,
+            ...item.properties,
+          },
+        };
+
+        const nestedResult = compileInternal(
+          nestedSchemaMatches[0]!,
+          nestedDefinition,
+          registry,
+          schemas,
+          nextStack,
+          nestedPath,
+        );
+
+        if (nestedResult.diagnostics.length > 0) {
+          diagnostics.push(...nestedResult.diagnostics);
+        } else {
+          compiledItems.push(nestedResult.output!);
+        }
+      });
+
+      properties[key] = compiledItems;
+      continue;
+    }
 
     if (propertySchema.type !== "component") {
       properties[key] = value;
