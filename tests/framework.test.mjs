@@ -1645,3 +1645,33 @@ test("primitive array item schemas reject schema constraints", () => {
     ),
   );
 });
+
+test("invalid schema defaults identify the property path", () => {
+  const schema = {
+    name: "Vehicle",
+    properties: {
+      speed: {
+        type: "number",
+        default: "fast",
+      },
+    },
+  };
+
+  const component = {
+    name: "Car",
+    version: "1.0.0",
+    schema: "Vehicle",
+    properties: {},
+  };
+
+  const result = compileComponent(schema, component, [], [schema]);
+
+  assert.equal(result.ok, false);
+  assert.ok(
+    result.diagnostics.some(
+      (diagnostic) =>
+        diagnostic.code === "INVALID_SCHEMA" &&
+        diagnostic.path === "schema.properties.speed.default",
+    ),
+  );
+});
