@@ -2015,8 +2015,8 @@ test("schema defaults reject nested BigInt values", () => {
   assert.ok(
     result.diagnostics.some(
       (diagnostic) =>
-        diagnostic.code === "INVALID_SCHEMA" &&
-        diagnostic.path === "schema.properties.settings.default",
+        diagnostic.code === "INVALID_JSON_VALUE" &&
+        diagnostic.path === "schema.properties.settings.default.count",
     ),
   );
 });
@@ -2049,8 +2049,8 @@ test("schema defaults reject circular references", () => {
   assert.ok(
     result.diagnostics.some(
       (diagnostic) =>
-        diagnostic.code === "INVALID_SCHEMA" &&
-        diagnostic.path === "schema.properties.settings.default",
+        diagnostic.code === "INVALID_JSON_VALUE" &&
+        diagnostic.path === "schema.properties.settings.default.self",
     ),
   );
 });

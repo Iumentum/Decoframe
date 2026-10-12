@@ -101,148 +101,291 @@ function setOwn(
 }
 
 const MAX_JSON_DEPTH = 100;
+const MAX_JSON_NODES = 1_000_000;
+const MAX_DIAGNOSTICS = 100;
 
-function validateJsonSafeValue(
+type SnapshotResult =
+  | { ok: true; value: unknown }
+  | { ok: false; diagnostics: Diagnostic[] };
+
+function snapshotJsonSafeValue(
   value: unknown,
   path: string,
-  diagnostics: Diagnostic[],
-): void {
-  type Frame =
-    | {
-        kind: "enter";
-        value: unknown;
-        path: string;
-        depth: number;
-      }
-    | {
-        kind: "exit";
-        value: object;
-      };
-
-  const stack: Frame[] = [
-    { kind: "enter", value, path, depth: 0 },
-  ];
+  maxNodes = MAX_JSON_NODES,
+): SnapshotResult {
+  const diagnostics: Diagnostic[] = [];
   const ancestors = new Set<object>();
+  let visited = 0;
+  let exhausted = false;
 
-  while (stack.length > 0) {
-    const frame = stack.pop()!;
-
-    if (frame.kind === "exit") {
-      ancestors.delete(frame.value);
-      continue;
+  function fail(currentPath: string, message: string): void {
+    if (diagnostics.length < MAX_DIAGNOSTICS) {
+      diagnostics.push({
+        code: "INVALID_JSON_VALUE",
+        path: currentPath,
+        message,
+      });
+    } else {
+      exhausted = true;
     }
+  }
 
-    const current = frame.value;
-    const currentPath = frame.path;
+  function copy(
+    current: unknown,
+    currentPath: string,
+    depth: number,
+  ): unknown {
+    visited += 1;
+
+    if (visited > maxNodes) {
+      exhausted = true;
+      return undefined;
+    }
 
     if (
       current === null ||
       typeof current === "string" ||
       typeof current === "boolean"
     ) {
-      continue;
+      return current;
     }
 
     if (typeof current === "number") {
       if (!Number.isFinite(current)) {
-        diagnostics.push({
-          code: "INVALID_JSON_VALUE",
-          path: currentPath,
-          message: `Non-finite numbers are not supported at "${currentPath}".`,
-        });
+        fail(
+          currentPath,
+          `Non-finite numbers are not supported at "${currentPath}".`,
+        );
+        return undefined;
       }
-      continue;
+
+      return Object.is(current, -0) ? 0 : current;
     }
 
     if (typeof current !== "object") {
-      diagnostics.push({
-        code: "INVALID_JSON_VALUE",
-        path: currentPath,
-        message: `Unsupported JSON value at "${currentPath}".`,
-      });
-      continue;
+      fail(
+        currentPath,
+        `Unsupported JSON value at "${currentPath}".`,
+      );
+      return undefined;
     }
 
-    if (frame.depth >= MAX_JSON_DEPTH) {
-      diagnostics.push({
-        code: "INVALID_JSON_VALUE",
-        path: currentPath,
-        message: `Maximum JSON nesting depth of ${MAX_JSON_DEPTH} exceeded at "${currentPath}".`,
-      });
-      continue;
+    if (depth >= MAX_JSON_DEPTH) {
+      fail(
+        currentPath,
+        `Maximum JSON nesting depth of ${MAX_JSON_DEPTH} exceeded at "${currentPath}".`,
+      );
+      return undefined;
     }
 
     if (ancestors.has(current)) {
-      diagnostics.push({
-        code: "INVALID_JSON_VALUE",
-        path: currentPath,
-        message: `Circular reference detected at "${currentPath}".`,
-      });
-      continue;
+      fail(
+        currentPath,
+        `Circular reference detected at "${currentPath}".`,
+      );
+      return undefined;
     }
 
     try {
+      const prototype = Object.getPrototypeOf(current);
       const isArray = Array.isArray(current);
 
       if (
         !isArray &&
-        (
-          !isRecord(current) ||
-          (
-            Object.getPrototypeOf(current) !== Object.prototype &&
-            Object.getPrototypeOf(current) !== null
-          )
-        )
+        prototype !== Object.prototype &&
+        prototype !== null
       ) {
-        diagnostics.push({
-          code: "INVALID_JSON_VALUE",
-          path: currentPath,
-          message: `Only plain objects are supported at "${currentPath}".`,
-        });
-        continue;
+        fail(
+          currentPath,
+          `Only plain objects are supported at "${currentPath}".`,
+        );
+        return undefined;
       }
 
-      const children: Frame[] = [];
+      const keys = Reflect.ownKeys(current);
+      const descriptors = new Map<PropertyKey, PropertyDescriptor>();
 
-      if (isArray) {
-        const array = current as unknown[];
+      for (const key of keys) {
+        const descriptor = Object.getOwnPropertyDescriptor(current, key);
 
-        for (let index = 0; index < array.length; index += 1) {
-          children.push({
-            kind: "enter",
-            value: array[index],
-            path: `${currentPath}[${index}]`,
-            depth: frame.depth + 1,
-          });
+        if (!descriptor) {
+          fail(
+            currentPath,
+            `Unable to inspect the value at "${currentPath}".`,
+          );
+          return undefined;
         }
-      } else {
-        for (const key of Object.keys(current)) {
-          children.push({
-            kind: "enter",
-            value: (current as Record<string, unknown>)[key],
-            path: `${currentPath}.${key}`,
-            depth: frame.depth + 1,
-          });
-        }
+
+        descriptors.set(key, descriptor);
       }
+
+      const result: unknown[] | Record<string, unknown> = isArray
+        ? []
+        : Object.create(null) as Record<string, unknown>;
 
       ancestors.add(current);
-      stack.push({ kind: "exit", value: current });
 
-      for (let index = children.length - 1; index >= 0; index -= 1) {
-        const child = children[index];
+      try {
+        if (isArray) {
+          const array = current as unknown[];
+          const output = result as unknown[];
 
-        if (child !== undefined) {
-          stack.push(child);
+          for (const key of keys) {
+            if (key === "length") {
+              continue;
+            }
+
+            if (
+              typeof key !== "string" ||
+              !/^(0|[1-9]\d*)$/.test(key) ||
+              Number(key) >= array.length ||
+              String(Number(key)) !== key
+            ) {
+              fail(
+                currentPath,
+                `Unsupported array property at "${currentPath}".`,
+              );
+              return undefined;
+            }
+
+            const descriptor = descriptors.get(key)!;
+
+            if (
+              !descriptor.enumerable ||
+              !("value" in descriptor)
+            ) {
+              fail(
+                `${currentPath}[${key}]`,
+                `Array entries must be enumerable data properties at "${currentPath}[${key}]".`,
+              );
+              return undefined;
+            }
+          }
+
+          if (keys.length !== array.length + 1) {
+            fail(
+              currentPath,
+              `Sparse arrays are not supported at "${currentPath}".`,
+            );
+            return undefined;
+          }
+
+          for (let index = 0; index < array.length; index += 1) {
+            const key = String(index);
+            const descriptor = descriptors.get(key);
+
+            if (!descriptor || !("value" in descriptor)) {
+              fail(
+                `${currentPath}[${index}]`,
+                `Sparse arrays are not supported at "${currentPath}[${index}]".`,
+              );
+              return undefined;
+            }
+
+            output.push(
+              copy(
+                descriptor.value,
+                `${currentPath}[${index}]`,
+                depth + 1,
+              ),
+            );
+
+            if (exhausted) {
+              return undefined;
+            }
+          }
+
+          return Object.freeze(output);
         }
+
+        const output = result as Record<string, unknown>;
+
+        for (const key of keys) {
+          if (typeof key !== "string") {
+            fail(
+              currentPath,
+              `Symbol keys are not supported at "${currentPath}".`,
+            );
+            return undefined;
+          }
+
+          const descriptor = descriptors.get(key)!;
+
+          if (
+            !descriptor.enumerable ||
+            !("value" in descriptor)
+          ) {
+            fail(
+              `${currentPath}.${key}`,
+              `Object properties must be enumerable data properties at "${currentPath}.${key}".`,
+            );
+            return undefined;
+          }
+
+          const copied = copy(
+            descriptor.value,
+            `${currentPath}.${key}`,
+            depth + 1,
+          );
+
+          if (exhausted) {
+            return undefined;
+          }
+
+          Object.defineProperty(output, key, {
+            value: copied,
+            enumerable: true,
+            writable: false,
+            configurable: false,
+          });
+        }
+
+        return Object.freeze(output);
+      } finally {
+        ancestors.delete(current);
       }
     } catch {
-      diagnostics.push({
-        code: "INVALID_JSON_VALUE",
-        path: currentPath,
-        message: `Unable to inspect the value at "${currentPath}".`,
-      });
+      fail(
+        currentPath,
+        `Unable to inspect the value at "${currentPath}".`,
+      );
+      return undefined;
     }
+  }
+
+  let snapshot: unknown;
+
+  try {
+    snapshot = copy(value, path, 0);
+  } catch {
+    fail(path, `Unable to inspect the value at "${path}".`);
+  }
+
+  if (visited > maxNodes) {
+    fail(
+      path,
+      `Maximum JSON node budget of ${maxNodes} exceeded at "${path}".`,
+    );
+  } else if (exhausted && diagnostics.length === 0) {
+    fail(path, "Further validation errors suppressed.");
+  }
+
+  if (diagnostics.length > 0 || exhausted) {
+    return { ok: false, diagnostics };
+  }
+
+  return { ok: true, value: snapshot };
+}
+
+function validateJsonSafeValue(
+  value: unknown,
+  path: string,
+  diagnostics: Diagnostic[],
+): void {
+  const result = snapshotJsonSafeValue(value, path);
+
+  if (!result.ok) {
+    diagnostics.push(...result.diagnostics);
   }
 }
 
@@ -1424,7 +1567,56 @@ export function compileComponent(
   schemas: readonly ComponentSchema[] = [schema],
   context: CompilationContext = {},
 ): CompileResult {
-  if (!isRecord(schema)) {
+  const snapshotInput = (value: unknown, path: string) =>
+    value === undefined
+      ? { ok: true as const, value }
+      : snapshotJsonSafeValue(value, path);
+
+  const schemaSnapshot = snapshotInput(schema, "schema");
+  const componentSnapshot = snapshotInput(component, "component");
+  const registrySnapshot = snapshotInput(registry, "registry");
+  const schemasSnapshot = snapshotInput(schemas, "schemas");
+  const contextSnapshot = snapshotInput(context, "context");
+
+  const snapshotDiagnostics: Diagnostic[] = [];
+
+  for (const snapshot of [
+    schemaSnapshot,
+    componentSnapshot,
+    registrySnapshot,
+    schemasSnapshot,
+    contextSnapshot,
+  ]) {
+    if (!snapshot.ok) {
+      snapshotDiagnostics.push(...snapshot.diagnostics);
+    }
+  }
+
+  if (
+    snapshotDiagnostics.length > 0 ||
+    !schemaSnapshot.ok ||
+    !componentSnapshot.ok ||
+    !registrySnapshot.ok ||
+    !schemasSnapshot.ok ||
+    !contextSnapshot.ok
+  ) {
+    return {
+      ok: false,
+      diagnostics: snapshotDiagnostics,
+    };
+  }
+
+  const validSchema = schemaSnapshot.value as ComponentSchema;
+  const validComponent =
+    componentSnapshot.value as ComponentDefinition;
+  const validRegistry =
+    registrySnapshot.value as readonly ComponentDefinition[];
+  const validSchemas =
+    schemasSnapshot.value as readonly ComponentSchema[];
+  const validContext =
+    contextSnapshot.value as CompilationContext;
+
+  if (!isRecord(validSchema)) {
     return {
       ok: false,
       diagnostics: [
@@ -1437,7 +1629,7 @@ export function compileComponent(
     };
   }
 
-  if (!isRecord(component)) {
+  if (!isRecord(validComponent)) {
     return {
       ok: false,
       diagnostics: [
@@ -1451,8 +1643,8 @@ export function compileComponent(
   }
 
   if (
-    !Array.isArray(registry) ||
-    !registry.every(
+    !Array.isArray(validRegistry) ||
+    !validRegistry.every(
       (item: unknown) =>
         typeof item === "object" &&
         item !== null &&
@@ -1472,8 +1664,8 @@ export function compileComponent(
   }
 
   if (
-    !Array.isArray(schemas) ||
-    !schemas.every(
+    !Array.isArray(validSchemas) ||
+    !validSchemas.every(
       (item: unknown) =>
         typeof item === "object" &&
         item !== null &&
@@ -1492,7 +1684,7 @@ export function compileComponent(
     };
   }
 
-  if (!isRecord(context)) {
+  if (!isRecord(validContext)) {
     return {
       ok: false,
       diagnostics: [
@@ -1505,21 +1697,10 @@ export function compileComponent(
     };
   }
 
-  const contextDiagnostics: Diagnostic[] = [];
-
-  validateJsonSafeValue(context, "context", contextDiagnostics);
-
-  if (contextDiagnostics.length > 0) {
-    return {
-      ok: false,
-      diagnostics: contextDiagnostics,
-    };
-  }
-
-  const validSchema = schema as unknown as ComponentSchema;
-  const validComponent = component as unknown as ComponentDefinition;
-  const validRegistry = registry as readonly ComponentDefinition[];
-  const validSchemas = schemas as readonly ComponentSchema[];
+  const identityPreservingSchemas = validSchemas.map(
+    (candidate, index) =>
+      schemas[index] === schema ? validSchema : candidate,
+  );
 
   const invalidSchemaPaths =
     getInvalidComponentSchemaPaths(validSchema);
@@ -1535,14 +1716,15 @@ export function compileComponent(
     };
   }
 
-  const invalidNestedSchemaDiagnostics = validSchemas.flatMap(
-    (candidate, index) => {
+  const invalidNestedSchemaDiagnostics =
+    identityPreservingSchemas.flatMap((candidate, index) => {
       if (candidate === validSchema) {
         return [];
       }
 
       return getInvalidComponentSchemaPaths(candidate).map((path) => {
-        const nestedPath = `schemas[${index}].${path.replace(/^schema\./, "")}`;
+        const nestedPath =
+          `schemas[${index}].${path.replace(/^schema\./, "")}`;
 
         return {
           code: "INVALID_SCHEMA",
@@ -1550,8 +1732,7 @@ export function compileComponent(
           message: `Invalid schema definition at "${nestedPath}".`,
         };
       });
-    },
-  );
+    });
 
   if (invalidNestedSchemaDiagnostics.length > 0) {
     return {
@@ -1564,8 +1745,8 @@ export function compileComponent(
     validSchema,
     validComponent,
     validRegistry,
-    validSchemas,
-    context as CompilationContext,
+    identityPreservingSchemas,
+    validContext,
     [],
     "",
   );
