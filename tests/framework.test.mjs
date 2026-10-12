@@ -3379,3 +3379,12 @@ test("schema rejects items on non-array properties", () => {
     ),
   );
 });
+
+test("public entry point exports only the public runtime functions", async () => {
+  const api = await import("../dist/index.js");
+
+  assert.deepEqual(
+    Object.keys(api).sort(),
+    ["compileComponent", "validateComponent"],
+  );
+});
