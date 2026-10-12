@@ -100,6 +100,152 @@ function setOwn(
   });
 }
 
+const MAX_JSON_DEPTH = 100;
+
+function validateJsonSafeValue(
+  value: unknown,
+  path: string,
+  diagnostics: Diagnostic[],
+): void {
+  type Frame =
+    | {
+        kind: "enter";
+        value: unknown;
+        path: string;
+        depth: number;
+      }
+    | {
+        kind: "exit";
+        value: object;
+      };
+
+  const stack: Frame[] = [
+    { kind: "enter", value, path, depth: 0 },
+  ];
+  const ancestors = new Set<object>();
+
+  while (stack.length > 0) {
+    const frame = stack.pop()!;
+
+    if (frame.kind === "exit") {
+      ancestors.delete(frame.value);
+      continue;
+    }
+
+    const current = frame.value;
+    const currentPath = frame.path;
+
+    if (
+      current === null ||
+      typeof current === "string" ||
+      typeof current === "boolean"
+    ) {
+      continue;
+    }
+
+    if (typeof current === "number") {
+      if (!Number.isFinite(current)) {
+        diagnostics.push({
+          code: "INVALID_JSON_VALUE",
+          path: currentPath,
+          message: `Non-finite numbers are not supported at "${currentPath}".`,
+        });
+      }
+      continue;
+    }
+
+    if (typeof current !== "object") {
+      diagnostics.push({
+        code: "INVALID_JSON_VALUE",
+        path: currentPath,
+        message: `Unsupported JSON value at "${currentPath}".`,
+      });
+      continue;
+    }
+
+    if (frame.depth >= MAX_JSON_DEPTH) {
+      diagnostics.push({
+        code: "INVALID_JSON_VALUE",
+        path: currentPath,
+        message: `Maximum JSON nesting depth of ${MAX_JSON_DEPTH} exceeded at "${currentPath}".`,
+      });
+      continue;
+    }
+
+    if (ancestors.has(current)) {
+      diagnostics.push({
+        code: "INVALID_JSON_VALUE",
+        path: currentPath,
+        message: `Circular reference detected at "${currentPath}".`,
+      });
+      continue;
+    }
+
+    try {
+      const isArray = Array.isArray(current);
+
+      if (
+        !isArray &&
+        (
+          !isRecord(current) ||
+          (
+            Object.getPrototypeOf(current) !== Object.prototype &&
+            Object.getPrototypeOf(current) !== null
+          )
+        )
+      ) {
+        diagnostics.push({
+          code: "INVALID_JSON_VALUE",
+          path: currentPath,
+          message: `Only plain objects are supported at "${currentPath}".`,
+        });
+        continue;
+      }
+
+      const children: Frame[] = [];
+
+      if (isArray) {
+        const array = current as unknown[];
+
+        for (let index = 0; index < array.length; index += 1) {
+          children.push({
+            kind: "enter",
+            value: array[index],
+            path: `${currentPath}[${index}]`,
+            depth: frame.depth + 1,
+          });
+        }
+      } else {
+        for (const key of Object.keys(current)) {
+          children.push({
+            kind: "enter",
+            value: (current as Record<string, unknown>)[key],
+            path: `${currentPath}.${key}`,
+            depth: frame.depth + 1,
+          });
+        }
+      }
+
+      ancestors.add(current);
+      stack.push({ kind: "exit", value: current });
+
+      for (let index = children.length - 1; index >= 0; index -= 1) {
+        const child = children[index];
+
+        if (child !== undefined) {
+          stack.push(child);
+        }
+      }
+    } catch {
+      diagnostics.push({
+        code: "INVALID_JSON_VALUE",
+        path: currentPath,
+        message: `Unable to inspect the value at "${currentPath}".`,
+      });
+    }
+  }
+}
+
 function canonicalize(value: unknown): unknown {
   if (Array.isArray(value)) {
     return value.map(canonicalize);
@@ -1150,7 +1296,11 @@ function getInvalidComponentSchemaPaths(
   for (const [key, property] of Object.entries(schema.properties)) {
     const path = `schema.properties.${key}`;
 
-    if (key.trim() === "" || !isRecord(property)) {
+    if (
+      key.trim() === "" ||
+      key === "__proto__" ||
+      !isRecord(property)
+    ) {
       invalidPaths.push(path);
       continue;
     }
@@ -1203,13 +1353,25 @@ function getInvalidComponentSchemaPaths(
       const defaultValue = property.default;
       const nullable = property.nullable === true;
 
-      if (
+      const validDefaultType =
         defaultValue === null
-          ? !nullable
-          : !matchesType(
+          ? nullable
+          : matchesType(
               defaultValue,
               property.type as PropertyType,
-            )
+            );
+
+      const defaultDiagnostics: Diagnostic[] = [];
+
+      validateJsonSafeValue(
+        defaultValue,
+        `${path}.default`,
+        defaultDiagnostics,
+      );
+
+      if (
+        !validDefaultType ||
+        defaultDiagnostics.length > 0
       ) {
         invalidPaths.push(`${path}.default`);
       }
@@ -1340,6 +1502,17 @@ export function compileComponent(
           message: "Compilation context must be an object.",
         },
       ],
+    };
+  }
+
+  const contextDiagnostics: Diagnostic[] = [];
+
+  validateJsonSafeValue(context, "context", contextDiagnostics);
+
+  if (contextDiagnostics.length > 0) {
+    return {
+      ok: false,
+      diagnostics: contextDiagnostics,
     };
   }
 

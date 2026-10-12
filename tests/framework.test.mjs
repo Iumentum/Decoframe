@@ -1421,6 +1421,195 @@ test("text interpolation resolves compilation context values", () => {
   }
 });
 
+test("compilation context rejects BigInt values", () => {
+  const schema = {
+    name: "Configuration",
+    properties: {},
+  };
+
+  const component = {
+    name: "App",
+    version: "1.0.0",
+    schema: "Configuration",
+    properties: {},
+  };
+
+  const result = compileComponent(
+    schema,
+    component,
+    [],
+    [schema],
+    { count: 1n },
+  );
+
+  assert.equal(result.ok, false);
+
+  if (!result.ok) {
+    assert.ok(
+      result.diagnostics.some(
+        (diagnostic) =>
+          diagnostic.code === "INVALID_JSON_VALUE" &&
+          diagnostic.path === "context.count",
+      ),
+    );
+  }
+});
+
+test("compilation context rejects circular values", () => {
+  const schema = {
+    name: "Configuration",
+    properties: {},
+  };
+
+  const component = {
+    name: "App",
+    version: "1.0.0",
+    schema: "Configuration",
+    properties: {},
+  };
+
+  const circular = {};
+  circular.self = circular;
+
+  const result = compileComponent(
+    schema,
+    component,
+    [],
+    [schema],
+    { settings: circular },
+  );
+
+  assert.equal(result.ok, false);
+
+  if (!result.ok) {
+    assert.ok(
+      result.diagnostics.some(
+        (diagnostic) =>
+          diagnostic.code === "INVALID_JSON_VALUE" &&
+          diagnostic.path === "context.settings.self",
+      ),
+    );
+  }
+});
+
+test("compilation context rejects non-finite numbers", () => {
+  const schema = {
+    name: "Configuration",
+    properties: {},
+  };
+
+  const component = {
+    name: "App",
+    version: "1.0.0",
+    schema: "Configuration",
+    properties: {},
+  };
+
+  const result = compileComponent(
+    schema,
+    component,
+    [],
+    [schema],
+    { settings: { timeout: Infinity } },
+  );
+
+  assert.equal(result.ok, false);
+
+  if (!result.ok) {
+    assert.ok(
+      result.diagnostics.some(
+        (diagnostic) =>
+          diagnostic.code === "INVALID_JSON_VALUE" &&
+          diagnostic.path === "context.settings.timeout",
+      ),
+    );
+  }
+});
+
+test("compilation context rejects proxies that throw during inspection", () => {
+  const schema = {
+    name: "Configuration",
+    properties: {},
+  };
+
+  const component = {
+    name: "App",
+    version: "1.0.0",
+    schema: "Configuration",
+    properties: {},
+  };
+
+  const hostile = new Proxy({}, {
+    ownKeys() {
+      throw new Error("Blocked inspection");
+    },
+  });
+
+  const result = compileComponent(
+    schema,
+    component,
+    [],
+    [schema],
+    { settings: hostile },
+  );
+
+  assert.equal(result.ok, false);
+
+  if (!result.ok) {
+    assert.ok(
+      result.diagnostics.some(
+        (diagnostic) =>
+          diagnostic.code === "INVALID_JSON_VALUE" &&
+          diagnostic.path === "context.settings" &&
+          diagnostic.message.includes("Unable to inspect"),
+      ),
+    );
+  }
+});
+
+test("compilation context rejects excessive nesting depth", () => {
+  const schema = {
+    name: "Configuration",
+    properties: {},
+  };
+
+  const component = {
+    name: "App",
+    version: "1.0.0",
+    schema: "Configuration",
+    properties: {},
+  };
+
+  let nested = {};
+  const context = { settings: nested };
+
+  for (let index = 0; index < 101; index += 1) {
+    const child = {};
+    nested.value = child;
+    nested = child;
+  }
+
+  const result = compileComponent(
+    schema,
+    component,
+    [],
+    [schema],
+    context,
+  );
+
+  assert.equal(result.ok, false);
+
+  if (!result.ok) {
+    assert.ok(
+      result.diagnostics.some(
+        (diagnostic) =>
+          diagnostic.code === "INVALID_JSON_VALUE" &&
+          diagnostic.message.includes("Maximum JSON nesting depth"),
+      ),
+    );
+  }
+});
+
 test("value interpolation preserves number types", () => {
   const schema = {
     name: "Configuration",
@@ -1799,6 +1988,73 @@ test("unknown property definition fields produce diagnostics", () => {
   );
 });
 
+test("schema defaults reject nested BigInt values", () => {
+  const schema = {
+    name: "Configuration",
+    properties: {
+      settings: {
+        type: "object",
+        default: {
+          count: 1n,
+        },
+      },
+    },
+  };
+
+  const component = {
+    name: "App",
+    version: "1.0.0",
+    schema: "Configuration",
+    properties: {},
+  };
+
+  const result = compileComponent(schema, component, [], [schema]);
+
+  assert.equal(result.ok, false);
+
+  assert.ok(
+    result.diagnostics.some(
+      (diagnostic) =>
+        diagnostic.code === "INVALID_SCHEMA" &&
+        diagnostic.path === "schema.properties.settings.default",
+    ),
+  );
+});
+
+test("schema defaults reject circular references", () => {
+  const circular = {};
+  circular.self = circular;
+
+  const schema = {
+    name: "Configuration",
+    properties: {
+      settings: {
+        type: "object",
+        default: circular,
+      },
+    },
+  };
+
+  const component = {
+    name: "App",
+    version: "1.0.0",
+    schema: "Configuration",
+    properties: {},
+  };
+
+  const result = compileComponent(schema, component, [], [schema]);
+
+  assert.equal(result.ok, false);
+
+  assert.ok(
+    result.diagnostics.some(
+      (diagnostic) =>
+        diagnostic.code === "INVALID_SCHEMA" &&
+        diagnostic.path === "schema.properties.settings.default",
+    ),
+  );
+});
+
 test("unknown array item schema fields produce diagnostics", () => {
   const schema = {
     name: "Vehicle",
@@ -2017,6 +2273,34 @@ test("invalid schema definitions report all invalid property paths", () => {
   );
   assert.ok(
     invalidSchemaPaths.includes("schema.properties.capacity.required"),
+  );
+});
+
+test("schema property names reject __proto__", () => {
+  const properties = Object.create(null);
+  properties.__proto__ = { type: "string" };
+
+  const schema = {
+    name: "Vehicle",
+    properties,
+  };
+
+  const component = {
+    name: "Car",
+    version: "1.0.0",
+    schema: "Vehicle",
+    properties: {},
+  };
+
+  const result = compileComponent(schema, component, [], [schema]);
+
+  assert.equal(result.ok, false);
+  assert.ok(
+    result.diagnostics.some(
+      (diagnostic) =>
+        diagnostic.code === "INVALID_SCHEMA" &&
+        diagnostic.path === "schema.properties.__proto__",
+    ),
   );
 });
 
