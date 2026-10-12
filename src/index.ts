@@ -864,19 +864,13 @@ function compileInternal(
     diagnostics: [],
   };
 }
-export function compileComponent(
-  schema: ComponentSchema,
-  component: ComponentDefinition,
-  registry: readonly ComponentDefinition[] = [],
-  schemas: readonly ComponentSchema[] = [schema],
-  context: CompilationContext = {},
-): CompileResult {
-  if (
-    !isRecord(schema) ||
-    typeof schema.name !== "string" ||
-    schema.name.trim() === "" ||
-    !isRecord(schema.properties) ||
-    Object.entries(schema.properties).some(
+function isValidComponentSchema(schema: unknown): schema is ComponentSchema {
+  return (
+    isRecord(schema) &&
+    typeof schema.name === "string" &&
+    schema.name.trim() !== "" &&
+    isRecord(schema.properties) &&
+    !Object.entries(schema.properties).some(
       ([key, property]) =>
         key.trim() === "" ||
         !isRecord(property) ||
@@ -912,9 +906,20 @@ export function compileComponent(
             ) ||
             (Object.hasOwn(property.items, "schema") &&
               (typeof property.items.schema !== "string" ||
-                !["object", "component"].includes(property.items.type as string))))),
+                !["object", "component"].includes(
+                  property.items.type as string,
+                ))))),
     )
-  ) {
+  );
+}
+export function compileComponent(
+  schema: ComponentSchema,
+  component: ComponentDefinition,
+  registry: readonly ComponentDefinition[] = [],
+  schemas: readonly ComponentSchema[] = [schema],
+  context: CompilationContext = {},
+): CompileResult {
+  if (!isValidComponentSchema(schema)) {
     return {
       ok: false,
       diagnostics: [
