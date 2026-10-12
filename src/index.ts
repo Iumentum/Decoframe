@@ -880,6 +880,12 @@ export function compileComponent(
       ([key, property]) =>
         key.trim() === "" ||
         !isRecord(property) ||
+        (Object.hasOwn(property, "required") &&
+          typeof property.required !== "boolean") ||
+        Object.keys(property).some(
+          (field) =>
+            !["type", "required", "default", "schema", "items"].includes(field),
+        ) ||
         typeof property.type !== "string" ||
         ![
           "string",
@@ -889,7 +895,24 @@ export function compileComponent(
           "component",
           "reference",
           "array",
-        ].includes(property.type),
+        ].includes(property.type) ||
+        (Object.hasOwn(property, "schema") &&
+          typeof property.schema !== "string") ||
+        (Object.hasOwn(property, "default") &&
+          !matchesType(property.default, property.type as PropertyType)) ||
+        (property.type === "array" && !Object.hasOwn(property, "items")) ||
+        (Object.hasOwn(property, "items") &&
+          (!isRecord(property.items) ||
+            Object.keys(property.items).some(
+              (field) => !["type", "schema"].includes(field),
+            ) ||
+            typeof property.items.type !== "string" ||
+            !["string", "number", "boolean", "object", "component"].includes(
+              property.items.type,
+            ) ||
+            (Object.hasOwn(property.items, "schema") &&
+              (typeof property.items.schema !== "string" ||
+                !["object", "component"].includes(property.items.type as string))))),
     )
   ) {
     return {

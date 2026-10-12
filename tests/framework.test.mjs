@@ -1462,3 +1462,186 @@ test("malformed property definitions produce diagnostics instead of crashing", (
     assert.ok(result.diagnostics.length > 0);
   });
 });
+
+test("unknown property definition fields produce diagnostics", () => {
+  const schema = {
+    name: "Vehicle",
+    properties: {
+      engine: {
+        type: "string",
+        requred: true,
+      },
+    },
+  };
+
+  const component = {
+    name: "Car",
+    version: "1.0.0",
+    schema: "Vehicle",
+    properties: {
+      engine: "V8",
+    },
+  };
+
+  const result = compileComponent(schema, component, [], [schema]);
+
+  assert.equal(result.ok, false);
+  assert.ok(
+    result.diagnostics.some(
+      (diagnostic) => diagnostic.code === "INVALID_SCHEMA",
+    ),
+  );
+});
+
+test("unknown array item schema fields produce diagnostics", () => {
+  const schema = {
+    name: "Vehicle",
+    properties: {
+      parts: {
+        type: "array",
+        items: {
+          type: "string",
+          requred: true,
+        },
+      },
+    },
+  };
+
+  const component = {
+    name: "Car",
+    version: "1.0.0",
+    schema: "Vehicle",
+    properties: {
+      parts: ["engine"],
+    },
+  };
+
+  const result = compileComponent(schema, component, [], [schema]);
+
+  assert.equal(result.ok, false);
+  assert.ok(
+    result.diagnostics.some(
+      (diagnostic) => diagnostic.code === "INVALID_SCHEMA",
+    ),
+  );
+});
+
+test("invalid required field types produce schema diagnostics", () => {
+  const schema = {
+    name: "Vehicle",
+    properties: {
+      engine: {
+        type: "string",
+        required: "yes",
+      },
+    },
+  };
+
+  const component = {
+    name: "Car",
+    version: "1.0.0",
+    schema: "Vehicle",
+    properties: {
+      engine: "V8",
+    },
+  };
+
+  const result = compileComponent(schema, component, [], [schema]);
+
+  assert.equal(result.ok, false);
+  assert.ok(
+    result.diagnostics.some(
+      (diagnostic) => diagnostic.code === "INVALID_SCHEMA",
+    ),
+  );
+});
+
+test("incompatible property defaults produce schema diagnostics", () => {
+  const schema = {
+    name: "Vehicle",
+    properties: {
+      speed: {
+        type: "number",
+        default: "fast",
+      },
+    },
+  };
+
+  const component = {
+    name: "Car",
+    version: "1.0.0",
+    schema: "Vehicle",
+    properties: {},
+  };
+
+  const result = compileComponent(schema, component, [], [schema]);
+
+  assert.equal(result.ok, false);
+  assert.ok(
+    result.diagnostics.some(
+      (diagnostic) => diagnostic.code === "INVALID_SCHEMA",
+    ),
+  );
+});
+
+test("array properties require an item schema", () => {
+  const schema = {
+    name: "Vehicle",
+    properties: {
+      parts: {
+        type: "array",
+      },
+    },
+  };
+
+  const component = {
+    name: "Car",
+    version: "1.0.0",
+    schema: "Vehicle",
+    properties: {
+      parts: ["engine"],
+    },
+  };
+
+  const result = compileComponent(schema, component, [], [schema]);
+
+  assert.equal(result.ok, false);
+  assert.ok(
+    result.diagnostics.some(
+      (diagnostic) => diagnostic.code === "INVALID_SCHEMA",
+    ),
+  );
+});
+
+test("primitive array item schemas reject schema constraints", () => {
+  const schema = {
+    name: "Vehicle",
+    properties: {
+      parts: {
+        type: "array",
+        items: {
+          type: "string",
+          schema: "Engine",
+        },
+      },
+    },
+  };
+
+  const component = {
+    name: "Car",
+    version: "1.0.0",
+    schema: "Vehicle",
+    properties: {
+      parts: ["engine"],
+    },
+  };
+
+  const result = compileComponent(schema, component, [], [schema]);
+
+  assert.equal(result.ok, false);
+  assert.ok(
+    result.diagnostics.some(
+      (diagnostic) => diagnostic.code === "INVALID_SCHEMA",
+    ),
+  );
+});
