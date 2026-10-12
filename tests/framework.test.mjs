@@ -979,3 +979,486 @@ test("references without schema constraints accept any target schema", () => {
     },
   );
 });
+
+test("text interpolation resolves other effective component properties", () => {
+  const schema = {
+    name: "Vehicle",
+    properties: {
+      make: { type: "string", required: true },
+      model: { type: "string", required: true },
+      description: { type: "string", required: true },
+    },
+  };
+
+  const component = {
+    name: "Car",
+    version: "1.0.0",
+    schema: "Vehicle",
+    properties: {
+      make: "Volvo",
+      model: "240",
+      description: "${text:property.make} ${text:property.model}",
+    },
+  };
+
+  const result = compileComponent(schema, component);
+
+  assert.deepEqual(result.diagnostics, []);
+  assert.equal(
+    JSON.parse(result.json).properties.description,
+    "Volvo 240",
+  );
+});
+
+test("circular property interpolation produces a diagnostic", () => {
+  const schema = {
+    name: "Vehicle",
+    properties: {
+      first: { type: "string", required: true },
+      second: { type: "string", required: true },
+    },
+  };
+
+  const component = {
+    name: "Car",
+    version: "1.0.0",
+    schema: "Vehicle",
+    properties: {
+      first: "${text:property.second}",
+      second: "${text:property.first}",
+    },
+  };
+
+  const result = compileComponent(schema, component);
+
+  assert.ok(
+    result.diagnostics.some(
+      (diagnostic) => diagnostic.code === "INTERPOLATION_CYCLE",
+    ),
+  );
+});
+
+test("object properties preserve nested objects and arrays", () => {
+  const schema = {
+    name: "Configuration",
+    properties: {
+      settings: {
+        type: "object",
+        required: true,
+      },
+    },
+  };
+
+  const component = {
+    name: "App",
+    version: "1.0.0",
+    schema: "Configuration",
+    properties: {
+      settings: {
+        features: ["search", "export"],
+        limits: {
+          retries: 3,
+        },
+      },
+    },
+  };
+
+  const result = compileComponent(schema, component);
+
+  assert.equal(result.ok, true);
+
+  if (result.ok) {
+    assert.deepEqual(JSON.parse(result.json).properties.settings, {
+      features: ["search", "export"],
+      limits: {
+        retries: 3,
+      },
+    });
+  }
+});
+
+test("text interpolation resolves compilation context values", () => {
+  const schema = {
+    name: "Configuration",
+    properties: {
+      description: {
+        type: "string",
+        required: true,
+      },
+    },
+  };
+
+  const component = {
+    name: "App",
+    version: "1.0.0",
+    schema: "Configuration",
+    properties: {
+      description: "Deploying to ${text:context.environment}",
+    },
+  };
+
+  const result = compileComponent(
+    schema,
+    component,
+    [],
+    [schema],
+    { environment: "production" },
+  );
+
+  assert.equal(result.ok, true);
+
+  if (result.ok) {
+    assert.equal(
+      JSON.parse(result.json).properties.description,
+      "Deploying to production",
+    );
+  }
+});
+
+test("value interpolation preserves number types", () => {
+  const schema = {
+    name: "Configuration",
+    properties: {
+      source: {
+        type: "number",
+        required: true,
+      },
+      destination: {
+        type: "number",
+        required: true,
+      },
+    },
+  };
+
+  const component = {
+    name: "App",
+    version: "1.0.0",
+    schema: "Configuration",
+    properties: {
+      source: 42,
+      destination: "${value:property.source}",
+    },
+  };
+
+  const result = compileComponent(schema, component);
+
+  assert.equal(result.ok, true);
+
+  if (result.ok) {
+    const output = JSON.parse(result.json);
+
+    assert.equal(output.properties.destination, 42);
+    assert.equal(typeof output.properties.destination, "number");
+  }
+});
+
+test("interpolation resolves recursively inside objects and arrays", () => {
+  const schema = {
+    name: "Configuration",
+    properties: {
+      environment: { type: "string", required: true },
+      settings: { type: "object", required: true },
+    },
+  };
+
+  const component = {
+    name: "App",
+    version: "1.0.0",
+    schema: "Configuration",
+    properties: {
+      environment: "production",
+      settings: {
+        label: "${text:property.environment}",
+        targets: [
+          "${text:context.region}",
+          "${value:property.environment}",
+        ],
+      },
+    },
+  };
+
+  const result = compileComponent(
+    schema,
+    component,
+    [],
+    [schema],
+    { region: "asia-southeast" },
+  );
+
+  assert.equal(result.ok, true);
+
+  if (result.ok) {
+    assert.deepEqual(JSON.parse(result.json).properties.settings, {
+      label: "production",
+      targets: ["asia-southeast", "production"],
+    });
+  }
+});
+
+test("missing interpolation sources produce diagnostics", () => {
+  const schema = {
+    name: "Configuration",
+    properties: {
+      description: { type: "string", required: true },
+    },
+  };
+
+  const component = {
+    name: "App",
+    version: "1.0.0",
+    schema: "Configuration",
+    properties: {
+      description: "${text:context.missing}",
+    },
+  };
+
+  const result = compileComponent(schema, component);
+
+  assert.equal(result.ok, false);
+  assert.ok(
+    result.diagnostics.some(
+      (diagnostic) =>
+        diagnostic.code === "INTERPOLATION_SOURCE_NOT_FOUND",
+    ),
+  );
+});
+
+test("text interpolation rejects object values", () => {
+  const schema = {
+    name: "Configuration",
+    properties: {
+      description: { type: "string", required: true },
+    },
+  };
+
+  const component = {
+    name: "App",
+    version: "1.0.0",
+    schema: "Configuration",
+    properties: {
+      description: "Configuration: ${text:context.settings}",
+    },
+  };
+
+  const result = compileComponent(
+    schema,
+    component,
+    [],
+    [schema],
+    { settings: { retries: 3 } },
+  );
+
+  assert.equal(result.ok, false);
+  assert.ok(
+    result.diagnostics.some(
+      (diagnostic) =>
+        diagnostic.code === "INVALID_INTERPOLATION_TYPE",
+    ),
+  );
+});
+
+test("interpolation does not alter component identities", () => {
+  const schema = {
+    name: "Configuration",
+    properties: {
+      label: { type: "string", required: true },
+    },
+  };
+
+  const component = {
+    name: "${text:context.name}",
+    version: "1.0.0",
+    schema: "Configuration",
+    properties: {
+      label: "Application",
+    },
+  };
+
+  const result = compileComponent(
+    schema,
+    component,
+    [],
+    [schema],
+    { name: "ResolvedName" },
+  );
+
+  assert.equal(result.ok, true);
+
+  if (result.ok) {
+    assert.equal(
+      JSON.parse(result.json).name,
+      "${text:context.name}",
+    );
+  }
+});
+
+test("circular interpolation does not hide unrelated missing sources", () => {
+  const schema = {
+    name: "Configuration",
+    properties: {
+      first: { type: "string", required: true },
+      second: { type: "string", required: true },
+      description: { type: "string", required: true },
+    },
+  };
+
+  const component = {
+    name: "App",
+    version: "1.0.0",
+    schema: "Configuration",
+    properties: {
+      first: "${text:property.second}",
+      second: "${text:property.first}",
+      description: "${text:context.missing}",
+    },
+  };
+
+  const result = compileComponent(schema, component);
+
+  assert.equal(result.ok, false);
+
+  assert.ok(
+    result.diagnostics.some(
+      (diagnostic) => diagnostic.code === "INTERPOLATION_CYCLE",
+    ),
+    "Expected a circular interpolation diagnostic",
+  );
+
+  assert.equal(
+    result.diagnostics.filter(
+      (diagnostic) =>
+        diagnostic.code === "INTERPOLATION_SOURCE_NOT_FOUND",
+    ).length,
+    1,
+    "Expected exactly one diagnostic for the unrelated missing source",
+  );
+});
+
+test("malformed nested components produce diagnostics", () => {
+  const schema = {
+    name: "Vehicle",
+    properties: {
+      engine: {
+        type: "component",
+        schema: "Engine",
+        required: true,
+      },
+    },
+  };
+
+  const component = {
+    name: "Car",
+    version: "1.0.0",
+    schema: "Vehicle",
+    properties: {
+      engine: {
+        name: "PetrolEngine",
+        version: "1.0.0",
+        properties: "not-an-object",
+      },
+    },
+  };
+
+  const result = compileComponent(schema, component, [petrolEngine], [
+    schema,
+    engineSchema,
+  ]);
+
+  assert.equal(result.ok, false);
+  assert.ok(
+    result.diagnostics.some(
+      (diagnostic) =>
+        diagnostic.code === "INVALID_PROPERTY_TYPE" &&
+        diagnostic.path === "properties.engine",
+    ),
+  );
+});
+
+test("malformed component array items produce diagnostics", () => {
+  const schema = {
+    name: "EngineCollection",
+    properties: {
+      engines: {
+        type: "array",
+        items: {
+          type: "component",
+          schema: "Engine",
+        },
+        required: true,
+      },
+    },
+  };
+
+  const component = {
+    name: "Fleet",
+    version: "1.0.0",
+    schema: "EngineCollection",
+    properties: {
+      engines: [
+        {
+          name: "PetrolEngine",
+          version: "1.0.0",
+          properties: "not-an-object",
+        },
+      ],
+    },
+  };
+
+  const result = compileComponent(
+    schema,
+    component,
+    [petrolEngine],
+    [schema, engineSchema],
+  );
+
+  assert.equal(result.ok, false);
+  assert.ok(
+    result.diagnostics.some(
+      (diagnostic) =>
+        diagnostic.code === "INVALID_ARRAY_ITEM" &&
+        diagnostic.path === "properties.engines[0]",
+    ),
+  );
+});
+
+test("malformed schema properties produce diagnostics instead of crashing", () => {
+  const schema = {
+    name: "Vehicle",
+    properties: null,
+  };
+
+  const component = {
+    name: "Car",
+    version: "1.0.0",
+    schema: "Vehicle",
+    properties: {},
+  };
+
+  assert.doesNotThrow(() => {
+    const result = compileComponent(schema, component, [], [schema]);
+    assert.equal(result.ok, false);
+    assert.ok(result.diagnostics.length > 0);
+  });
+});
+
+test("malformed property definitions produce diagnostics instead of crashing", () => {
+  const schema = {
+    name: "Vehicle",
+    properties: {
+      engine: null,
+    },
+  };
+
+  const component = {
+    name: "Car",
+    version: "1.0.0",
+    schema: "Vehicle",
+    properties: {},
+  };
+
+  assert.doesNotThrow(() => {
+    const result = compileComponent(schema, component, [], [schema]);
+    assert.equal(result.ok, false);
+    assert.ok(result.diagnostics.length > 0);
+  });
+});
