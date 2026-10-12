@@ -864,103 +864,125 @@ function compileInternal(
     diagnostics: [],
   };
 }
-function getInvalidComponentSchemaPath(
+function getInvalidComponentSchemaPaths(
   schema: unknown,
-): string | undefined {
-  if (!isRecord(schema)) return "schema";
+): string[] {
+  if (!isRecord(schema)) return ["schema"];
+
+  const invalidPaths: string[] = [];
+
   if (typeof schema.name !== "string" || schema.name.trim() === "") {
-    return "schema.name";
+    invalidPaths.push("schema.name");
   }
-  if (!isRecord(schema.properties)) return "schema.properties";
+
+  if (!isRecord(schema.properties)) {
+    invalidPaths.push("schema.properties");
+    return invalidPaths;
+  }
+
+  const allowedTypes = [
+    "string",
+    "number",
+    "boolean",
+    "object",
+    "component",
+    "reference",
+    "array",
+  ];
+
+  const allowedItemTypes = [
+    "string",
+    "number",
+    "boolean",
+    "object",
+    "component",
+  ];
 
   for (const [key, property] of Object.entries(schema.properties)) {
     const path = `schema.properties.${key}`;
 
-    if (key.trim() === "" || !isRecord(property)) return path;
+    if (key.trim() === "" || !isRecord(property)) {
+      invalidPaths.push(path);
+      continue;
+    }
 
     if (
       Object.hasOwn(property, "required") &&
       typeof property.required !== "boolean"
     ) {
-      return `${path}.required`;
+      invalidPaths.push(`${path}.required`);
     }
 
     const allowedFields = ["type", "required", "default", "schema", "items"];
-    const unknownField = Object.keys(property).find(
-      (field) => !allowedFields.includes(field),
-    );
-    if (unknownField) return `${path}.${unknownField}`;
 
-    const types = [
-      "string",
-      "number",
-      "boolean",
-      "object",
-      "component",
-      "reference",
-      "array",
-    ];
+    for (const field of Object.keys(property)) {
+      if (!allowedFields.includes(field)) {
+        invalidPaths.push(`${path}.${field}`);
+      }
+    }
 
-    if (
-      typeof property.type !== "string" ||
-      !types.includes(property.type)
-    ) {
-      return `${path}.type`;
+    const validType =
+      typeof property.type === "string" &&
+      allowedTypes.includes(property.type);
+
+    if (!validType) {
+      invalidPaths.push(`${path}.type`);
     }
 
     if (
       Object.hasOwn(property, "schema") &&
       typeof property.schema !== "string"
     ) {
-      return `${path}.schema`;
+      invalidPaths.push(`${path}.schema`);
     }
 
     if (
+      validType &&
       Object.hasOwn(property, "default") &&
       !matchesType(property.default, property.type as PropertyType)
     ) {
-      return `${path}.default`;
+      invalidPaths.push(`${path}.default`);
     }
 
     if (property.type === "array" && !Object.hasOwn(property, "items")) {
-      return `${path}.items`;
+      invalidPaths.push(`${path}.items`);
     }
 
     if (Object.hasOwn(property, "items")) {
-      if (!isRecord(property.items)) return `${path}.items`;
+      if (!isRecord(property.items)) {
+        invalidPaths.push(`${path}.items`);
+        continue;
+      }
 
       const itemPath = `${path}.items`;
-      const unknownItemField = Object.keys(property.items).find(
-        (field) => !["type", "schema"].includes(field),
-      );
-      if (unknownItemField) return `${itemPath}.${unknownItemField}`;
 
-      const itemTypes = [
-        "string",
-        "number",
-        "boolean",
-        "object",
-        "component",
-      ];
+      for (const field of Object.keys(property.items)) {
+        if (!["type", "schema"].includes(field)) {
+          invalidPaths.push(`${itemPath}.${field}`);
+        }
+      }
 
-      if (
-        typeof property.items.type !== "string" ||
-        !itemTypes.includes(property.items.type)
-      ) {
-        return `${itemPath}.type`;
+      const validItemType =
+        typeof property.items.type === "string" &&
+        allowedItemTypes.includes(property.items.type);
+
+      if (!validItemType) {
+        invalidPaths.push(`${itemPath}.type`);
       }
 
       if (
         Object.hasOwn(property.items, "schema") &&
         (typeof property.items.schema !== "string" ||
-          !["object", "component"].includes(property.items.type))
+          !["object", "component"].includes(
+            property.items.type as string,
+          ))
       ) {
-        return `${itemPath}.schema`;
+        invalidPaths.push(`${itemPath}.schema`);
       }
     }
   }
 
-  return undefined;
+  return invalidPaths;
 }
 export function compileComponent(
   schema: ComponentSchema,
@@ -969,18 +991,16 @@ export function compileComponent(
   schemas: readonly ComponentSchema[] = [schema],
   context: CompilationContext = {},
 ): CompileResult {
-  const invalidSchemaPath = getInvalidComponentSchemaPath(schema);
+  const invalidSchemaPaths = getInvalidComponentSchemaPaths(schema);
 
-  if (invalidSchemaPath !== undefined) {
+  if (invalidSchemaPaths.length > 0) {
     return {
       ok: false,
-      diagnostics: [
-        {
-          code: "INVALID_SCHEMA",
-          path: invalidSchemaPath,
-          message: `Invalid schema definition at "${invalidSchemaPath}".`,
-        },
-      ],
+      diagnostics: invalidSchemaPaths.map((path) => ({
+        code: "INVALID_SCHEMA",
+        path,
+        message: `Invalid schema definition at "${path}".`,
+      })),
     };
   }
 

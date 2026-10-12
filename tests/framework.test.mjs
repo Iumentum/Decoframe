@@ -1675,3 +1675,41 @@ test("invalid schema defaults identify the property path", () => {
     ),
   );
 });
+
+test("invalid schema definitions report all invalid property paths", () => {
+  const schema = {
+    name: "Vehicle",
+    properties: {
+      speed: {
+        type: "number",
+        default: "fast",
+      },
+      capacity: {
+        type: "number",
+        required: "yes",
+      },
+    },
+  };
+
+  const component = {
+    name: "Car",
+    version: "1.0.0",
+    schema: "Vehicle",
+    properties: {},
+  };
+
+  const result = compileComponent(schema, component, [], [schema]);
+
+  assert.equal(result.ok, false);
+
+  const invalidSchemaPaths = result.diagnostics
+    .filter((diagnostic) => diagnostic.code === "INVALID_SCHEMA")
+    .map((diagnostic) => diagnostic.path);
+
+  assert.ok(
+    invalidSchemaPaths.includes("schema.properties.speed.default"),
+  );
+  assert.ok(
+    invalidSchemaPaths.includes("schema.properties.capacity.required"),
+  );
+});
