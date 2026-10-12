@@ -735,6 +735,10 @@ export function validateComponent(
       ? component.properties[key]
       : propertySchema.default;
 
+    if (value === null && propertySchema.nullable === true) {
+      continue;
+    }
+
     if (!matchesType(value, propertySchema.type)) {
       diagnostics.push({
         code: "INVALID_PROPERTY_TYPE",

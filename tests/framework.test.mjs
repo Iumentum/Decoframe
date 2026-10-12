@@ -2301,3 +2301,74 @@ test("object defaults merge with inherited and child properties", () => {
     },
   });
 });
+
+test("invalid object overrides do not fall back to object defaults", () => {
+  const schema = {
+    name: "Test",
+    version: "1.0.0",
+    properties: {
+      settings: {
+        type: "object",
+        default: {
+          enabled: true,
+        },
+      },
+    },
+  };
+
+  for (const value of ["invalid", null]) {
+    const component = {
+      name: "Example",
+      version: "1.0.0",
+      schema: "Test",
+      properties: {
+        settings: value,
+      },
+    };
+
+    const result = compileComponent(schema, component);
+
+    assert.equal(
+      result.ok,
+      false,
+      `Expected override ${JSON.stringify(value)} to be rejected`,
+    );
+  }
+});
+
+test("nullable null overrides an object default", () => {
+  const schema = {
+    name: "Test",
+    version: "1.0.0",
+    properties: {
+      settings: {
+        type: "object",
+        nullable: true,
+        default: {
+          enabled: true,
+        },
+      },
+    },
+  };
+
+  const component = {
+    name: "Example",
+    version: "1.0.0",
+    schema: "Test",
+    properties: {
+      settings: null,
+    },
+  };
+
+  const result = compileComponent(schema, component);
+
+  assert.equal(result.ok, true);
+
+  if (!result.ok) {
+    assert.fail(JSON.stringify(result.diagnostics));
+  }
+
+  assert.deepEqual(JSON.parse(result.json).properties, {
+    settings: null,
+  });
+});
