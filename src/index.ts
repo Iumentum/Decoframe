@@ -429,33 +429,45 @@ export function validateComponent(
   const diagnostics: Diagnostic[] = [];
 
   if (!isRecord(component)) {
-    return [{
-      code: "INVALID_COMPONENT",
-      path: "component",
-      message: "Component definition must be an object.",
-    }];
+    return [
+      {
+        code: "INVALID_COMPONENT",
+        path: "component",
+        message: "Component definition must be an object.",
+      },
+    ];
   }
-  if (!schema.name.trim()) {
+
+  if (typeof schema.name !== "string" || !schema.name.trim()) {
     diagnostics.push({
       code: "INVALID_SCHEMA_NAME",
       path: "schema.name",
       message: "Schema name must not be empty.",
     });
   }
-  if (!component.name.trim()) {
+
+  if (
+    typeof component.name !== "string" ||
+    !component.name.trim()
+  ) {
     diagnostics.push({
       code: "INVALID_COMPONENT_NAME",
       path: "name",
       message: "Component name must not be empty.",
     });
   }
-  if (!component.version.trim()) {
+
+  if (
+    typeof component.version !== "string" ||
+    !component.version.trim()
+  ) {
     diagnostics.push({
       code: "INVALID_COMPONENT_VERSION",
       path: "version",
       message: "Component version must not be empty.",
     });
   }
+
   if (component.schema !== schema.name) {
     diagnostics.push({
       code: "SCHEMA_MISMATCH",
@@ -465,14 +477,17 @@ export function validateComponent(
         `but "${schema.name}" was provided.`,
     });
   }
+
   if (!isRecord(component.properties)) {
     diagnostics.push({
       code: "INVALID_PROPERTIES",
       path: "properties",
       message: "Component properties must be an object.",
     });
+
     return diagnostics;
   }
+
   for (const key of Object.keys(component.properties).sort()) {
     if (!Object.hasOwn(schema.properties, key)) {
       diagnostics.push({
@@ -482,10 +497,12 @@ export function validateComponent(
       });
     }
   }
+
   for (const key of Object.keys(schema.properties).sort()) {
     const propertySchema = schema.properties[key]!;
     const supplied = Object.hasOwn(component.properties, key);
     const hasDefault = Object.hasOwn(propertySchema, "default");
+
     if (!supplied && !hasDefault) {
       if (propertySchema.required) {
         diagnostics.push({
@@ -494,19 +511,24 @@ export function validateComponent(
           message: `Required property "${key}" is missing.`,
         });
       }
+
       continue;
     }
+
     const value = supplied
       ? component.properties[key]
       : propertySchema.default;
+
     if (!matchesType(value, propertySchema.type)) {
       diagnostics.push({
         code: "INVALID_PROPERTY_TYPE",
         path: `properties.${key}`,
         message: `Expected ${propertySchema.type} for property "${key}".`,
       });
+
       continue;
     }
+
     if (
       propertySchema.type === "component" &&
       propertySchema.schema !== undefined &&
@@ -520,16 +542,20 @@ export function validateComponent(
         message: `Expected nested component schema "${propertySchema.schema}".`,
       });
     }
+
     if (propertySchema.type === "array" && Array.isArray(value)) {
       const itemSchema = propertySchema.items;
+
       if (!itemSchema) {
         diagnostics.push({
           code: "MISSING_ARRAY_ITEM_SCHEMA",
           path: `properties.${key}`,
           message: `Array property "${key}" must declare an item schema.`,
         });
+
         continue;
       }
+
       value.forEach((item, index) => {
         if (!matchesType(item, itemSchema.type)) {
           diagnostics.push({
@@ -541,6 +567,7 @@ export function validateComponent(
       });
     }
   }
+
   return diagnostics;
 }
 function compileInternal(

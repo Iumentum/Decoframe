@@ -1788,3 +1788,23 @@ test("validateComponent handles malformed runtime inputs without throwing", () =
     assert.ok(diagnostics.length > 0);
   });
 });
+
+test("validateComponent handles malformed component fields without throwing", () => {
+  const schema = {
+    name: "Vehicle",
+    properties: {},
+  };
+
+  for (const component of [
+    {},
+    { name: 123, version: "1.0.0", properties: {} },
+    { name: "Vehicle", version: null, properties: {} },
+    { name: "Vehicle", version: "1.0.0", properties: null },
+  ]) {
+    assert.doesNotThrow(() => {
+      const diagnostics = validateComponent(schema, component);
+      assert.ok(Array.isArray(diagnostics));
+      assert.ok(diagnostics.length > 0);
+    });
+  }
+});
