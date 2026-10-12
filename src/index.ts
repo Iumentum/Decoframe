@@ -155,6 +155,7 @@ function mergeEffectiveProperties(
   diagnostics: Diagnostic[];
 } {
   const properties: Record<string, unknown> = {};
+  const diagnostics: Diagnostic[] = [];
 
   const setOwn = (
     target: Record<string, unknown>,
@@ -174,31 +175,63 @@ function mergeEffectiveProperties(
   }
 
   for (const key of Object.keys(overrides)) {
-    const defaultValue = Object.hasOwn(properties, key)
+    const inheritedValue = Object.hasOwn(properties, key)
       ? properties[key]
       : undefined;
     const overrideValue = overrides[key];
     const propertySchema = schema.properties[key];
 
-    if (
+    if (propertySchema?.type === "array" && isRecord(overrideValue)) {
+      const operatorKeys = Object.keys(overrideValue);
+
+      if (
+        operatorKeys.length !== 1 ||
+        operatorKeys[0] !== "$append" ||
+        !Array.isArray(overrideValue.$append)
+      ) {
+        diagnostics.push({
+          code: "INVALID_ARRAY_APPEND",
+          path: `${path}.${key}`,
+          message:
+            `Array property "${key}" must use {$append: [...]} ` +
+            "with an array value.",
+        });
+        continue;
+      }
+
+      if (
+        inheritedValue !== undefined &&
+        !Array.isArray(inheritedValue)
+      ) {
+        diagnostics.push({
+          code: "INVALID_ARRAY_APPEND",
+          path: `${path}.${key}`,
+          message:
+            `Cannot append to inherited non-array property "${key}".`,
+        });
+        continue;
+      }
+
+      setOwn(properties, key, [
+        ...(Array.isArray(inheritedValue) ? inheritedValue : []),
+        ...overrideValue.$append,
+      ]);
+    } else if (
       propertySchema?.type === "object" &&
-      isRecord(defaultValue) &&
+      isRecord(inheritedValue) &&
       isRecord(overrideValue)
     ) {
       setOwn(
         properties,
         key,
-        mergeObjectValues(defaultValue, overrideValue),
+        mergeObjectValues(inheritedValue, overrideValue),
       );
     } else {
       setOwn(properties, key, overrideValue);
     }
   }
 
-  return {
-    properties,
-    diagnostics: [],
-  };
+  return { properties, diagnostics };
 }
 function resolveInheritance(
   component: ComponentDefinition,
@@ -1010,12 +1043,21 @@ function compileInternal(
           });
           return;
         }
+        const nestedMerge = mergeEffectiveProperties(
+          definition.properties,
+          item.properties,
+          nestedSchemaMatches[0]!,
+          `${nestedPath}.properties`,
+        );
+
+        if (nestedMerge.diagnostics.length > 0) {
+          diagnostics.push(...nestedMerge.diagnostics);
+          return;
+        }
+
         const nestedDefinition: ComponentDefinition = {
           ...definition,
-          properties: {
-            ...definition.properties,
-            ...item.properties,
-          },
+          properties: nestedMerge.properties,
         };
         const nestedResult = compileInternal(
           nestedSchemaMatches[0]!,
@@ -1099,12 +1141,21 @@ function compileInternal(
       });
       continue;
     }
+    const nestedMerge = mergeEffectiveProperties(
+      definition.properties,
+      value.properties,
+      nestedSchemaMatches[0]!,
+      `${propertyPath}.properties`,
+    );
+
+    if (nestedMerge.diagnostics.length > 0) {
+      diagnostics.push(...nestedMerge.diagnostics);
+      continue;
+    }
+
     const nestedDefinition: ComponentDefinition = {
       ...definition,
-      properties: {
-        ...definition.properties,
-        ...value.properties,
-      },
+      properties: nestedMerge.properties,
     };
     const nestedResult = compileInternal(
       nestedSchemaMatches[0]!,

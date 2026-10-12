@@ -693,6 +693,72 @@ test("array defaults are applied during compilation", () => {
   }
 });
 
+test("instance array append preserves definition items", () => {
+  const itemSchema = {
+    name: "TaggedItem",
+    properties: {
+      tags: {
+        type: "array",
+        items: { type: "string" },
+        required: true,
+      },
+    },
+  };
+
+  const containerSchema = {
+    name: "Container",
+    properties: {
+      item: {
+        type: "component",
+        schema: "TaggedItem",
+        required: true,
+      },
+    },
+  };
+
+  const definition = {
+    name: "BaseItem",
+    version: "1.0.0",
+    schema: "TaggedItem",
+    properties: {
+      tags: ["definition-tag"],
+    },
+  };
+
+  const component = {
+    name: "ExampleContainer",
+    version: "1.0.0",
+    schema: "Container",
+    properties: {
+      item: {
+        name: "BaseItem",
+        version: "1.0.0",
+        properties: {
+          tags: {
+            $append: ["instance-tag"],
+          },
+        },
+      },
+    },
+  };
+
+  const result = compileComponent(
+    containerSchema,
+    component,
+    [definition],
+    [containerSchema, itemSchema],
+  );
+
+  assert.equal(result.ok, true);
+
+  if (result.ok) {
+    assert.deepEqual(
+      JSON.parse(result.json).properties.item.properties.tags,
+      ["definition-tag", "instance-tag"],
+    );
+  }
+});
+
 test("child array properties replace inherited arrays", () => {
   const schema = {
     name: "TaggedItem",
