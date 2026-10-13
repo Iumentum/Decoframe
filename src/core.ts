@@ -909,6 +909,16 @@ function resolveInterpolations(
   ): unknown {
     consumeWork(budget);
     const parts = sourcePath.split(".");
+
+    if (parts.some((part) => part.length === 0)) {
+      diagnostic(
+        "INVALID_INTERPOLATION",
+        targetPath,
+        "Malformed interpolation source path.",
+      );
+      return undefined;
+    }
+
     const root = parts.shift()!;
     let value: unknown;
     if (sourceType === "property") {

@@ -119,25 +119,102 @@ test("unknown properties are rejected", () => {
   }
 });
 
-test("equivalent inputs produce identical JSON", () => {
-  const first = compileComponent(vehicleSchema, vehicle);
-
-  const reorderedVehicle = {
+test("validation reports multiple independent component errors", () => {
+  const component = {
     ...vehicle,
     properties: {
-      electric: true,
-      model: "E1",
       make: "Example Motors",
+      colour: "blue",
     },
   };
 
-  const second = compileComponent(vehicleSchema, reorderedVehicle);
+  const diagnostics = validateComponent(vehicleSchema, component);
+
+  assert.ok(
+    diagnostics.some(
+      (diagnostic) =>
+        diagnostic.code === "MISSING_REQUIRED_PROPERTY" &&
+        diagnostic.path === "properties.model",
+    ),
+    JSON.stringify(diagnostics, null, 2),
+  );
+
+  assert.ok(
+    diagnostics.some(
+      (diagnostic) =>
+        diagnostic.code === "UNKNOWN_PROPERTY" &&
+        diagnostic.path === "properties.colour",
+    ),
+    JSON.stringify(diagnostics, null, 2),
+  );
+});
+
+test("equivalent inputs produce identical JSON", () => {
+  const schema = {
+    name: "Configuration",
+    properties: {
+      settings: { type: "object", required: true },
+      items: {
+        type: "array",
+        items: { type: "object" },
+        required: true,
+      },
+    },
+  };
+
+  const component = {
+    name: "App",
+    version: "1.0.0",
+    schema: "Configuration",
+    properties: {
+      settings: {
+        zebra: 1,
+        alpha: {
+          second: 2,
+          first: 1,
+        },
+      },
+      items: [
+        { zebra: 1, alpha: 2 },
+        { second: 2, first: 1 },
+      ],
+    },
+  };
+
+  const reorderedComponent = {
+    ...component,
+    properties: {
+      items: [
+        { alpha: 2, zebra: 1 },
+        { first: 1, second: 2 },
+      ],
+      settings: {
+        alpha: {
+          first: 1,
+          second: 2,
+        },
+        zebra: 1,
+      },
+    },
+  };
+
+  const first = compileComponent(schema, component);
+  const second = compileComponent(schema, reorderedComponent);
 
   assert.equal(first.ok, true);
   assert.equal(second.ok, true);
 
   if (first.ok && second.ok) {
     assert.equal(first.json, second.json);
+
+    const output = JSON.parse(first.json);
+    assert.deepEqual(
+      output.properties.items.map((item) => Object.keys(item)),
+      [
+        ["alpha", "zebra"],
+        ["first", "second"],
+      ],
+    );
   }
 });
 
@@ -242,6 +319,102 @@ test("missing parent produces a diagnostic", () => {
   }
 });
 
+test("ambiguous parents produce AMBIGUOUS_PARENT", () => {
+  const parent = {
+    name: "Vehicle",
+    version: "1.0.0",
+    schema: "Vehicle",
+    properties: {
+      make: "Example Motors",
+      model: "E1",
+    },
+  };
+
+  const duplicateParent = {
+    ...parent,
+    properties: {
+      make: "Another Motors",
+      model: "E2",
+    },
+  };
+
+  const child = {
+    name: "ElectricVehicle",
+    version: "1.0.0",
+    schema: "Vehicle",
+    extends: {
+      name: "Vehicle",
+      version: "1.0.0",
+    },
+    properties: {},
+  };
+
+  const result = compileComponent(
+    vehicleSchema,
+    child,
+    [parent, duplicateParent],
+  );
+
+  assert.equal(result.ok, false);
+
+  if (!result.ok) {
+    assert.ok(
+      result.diagnostics.some(
+        (diagnostic) => diagnostic.code === "AMBIGUOUS_PARENT",
+      ),
+      JSON.stringify(result.diagnostics, null, 2),
+    );
+  }
+});
+
+test("parent schema mismatches produce INHERITANCE_SCHEMA_MISMATCH", () => {
+  const otherSchema = {
+    name: "OtherVehicle",
+    properties: {
+      description: { type: "string" },
+    },
+  };
+
+  const parent = {
+    name: "Vehicle",
+    version: "1.0.0",
+    schema: "OtherVehicle",
+    properties: {
+      description: "A different schema",
+    },
+  };
+
+  const child = {
+    name: "ElectricVehicle",
+    version: "1.0.0",
+    schema: "Vehicle",
+    extends: {
+      name: "Vehicle",
+      version: "1.0.0",
+    },
+    properties: {},
+  };
+
+  const result = compileComponent(
+    vehicleSchema,
+    child,
+    [parent],
+    [vehicleSchema, otherSchema],
+  );
+
+  assert.equal(result.ok, false);
+
+  if (!result.ok) {
+    assert.ok(
+      result.diagnostics.some(
+        (diagnostic) =>
+          diagnostic.code === "INHERITANCE_SCHEMA_MISMATCH",
+      ),
+      JSON.stringify(result.diagnostics, null, 2),
+    );
+  }
+});
+
 test("inheritance cycles produce a diagnostic", () => {
   const first = {
     name: "VehicleA",
@@ -342,6 +515,81 @@ const familyCar = {
   },
 };
 
+test("nested component cycles produce COMPONENT_CYCLE", () => {
+  const recursiveSchema = {
+    name: "RecursiveNode",
+    properties: {
+      child: {
+        type: "component",
+        schema: "RecursiveNode",
+      },
+    },
+  };
+
+  const recursiveNode = {
+    name: "Node",
+    version: "1.0.0",
+    schema: "RecursiveNode",
+    properties: {
+      child: {
+        name: "Node",
+        version: "1.0.0",
+        properties: {},
+      },
+    },
+  };
+
+  const result = compileComponent(
+    recursiveSchema,
+    recursiveNode,
+    [recursiveNode],
+    [recursiveSchema],
+  );
+
+  assert.equal(result.ok, false);
+  assert.ok(
+    result.diagnostics.some(
+      (diagnostic) => diagnostic.code === "COMPONENT_CYCLE",
+    ),
+  );
+});
+
+test("nested validation diagnostics include the full component path", () => {
+  const invalidFamilyCar = {
+    ...familyCar,
+    properties: {
+      ...familyCar.properties,
+      engine: {
+        ...familyCar.properties.engine,
+        properties: {
+          horsepower: "high",
+        },
+      },
+    },
+  };
+
+  const result = compileComponent(
+    vehicleWithEngineSchema,
+    invalidFamilyCar,
+    [petrolEngine],
+    [vehicleSchema, engineSchema],
+  );
+
+  assert.equal(result.ok, false);
+
+  if (!result.ok) {
+    assert.ok(
+      result.diagnostics.some(
+        (diagnostic) =>
+          diagnostic.code === "INVALID_PROPERTY_TYPE" &&
+          diagnostic.path ===
+            "properties.engine.properties.horsepower",
+      ),
+      JSON.stringify(result.diagnostics, null, 2),
+    );
+  }
+});
+
 test("nested component references compile recursively with overrides", () => {
   const result = compileComponent(
     vehicleWithEngineSchema,
@@ -411,6 +659,44 @@ test("nested component schema mismatches produce a diagnostic", () => {
       ),
     );
   }
+});
+
+test("missing nested schemas produce NESTED_SCHEMA_NOT_FOUND", () => {
+  const result = compileComponent(
+    vehicleWithEngineSchema,
+    familyCar,
+    [petrolEngine],
+    [vehicleSchema],
+  );
+
+  assert.equal(result.ok, false);
+  assert.ok(
+    result.diagnostics.some(
+      (diagnostic) =>
+        diagnostic.code === "NESTED_SCHEMA_NOT_FOUND",
+    ),
+  );
+});
+
+test("ambiguous nested schemas produce NESTED_SCHEMA_NOT_FOUND", () => {
+  const duplicateEngineSchema = {
+    ...engineSchema,
+  };
+
+  const result = compileComponent(
+    vehicleWithEngineSchema,
+    familyCar,
+    [petrolEngine],
+    [vehicleSchema, engineSchema, duplicateEngineSchema],
+  );
+
+  assert.equal(result.ok, false);
+  assert.ok(
+    result.diagnostics.some(
+      (diagnostic) =>
+        diagnostic.code === "NESTED_SCHEMA_NOT_FOUND",
+    ),
+  );
 });
 
 test("nested components can contain further nested components", () => {
@@ -662,6 +948,64 @@ test("missing component references in arrays produce indexed diagnostics", () =>
           diagnostic.path === "properties.engines[0]",
       ),
     );
+  }
+});
+
+test("multiple invalid component array items produce all indexed diagnostics", () => {
+  const schema = {
+    name: "EngineCollection",
+    properties: {
+      engines: {
+        type: "array",
+        items: {
+          type: "component",
+          schema: "Engine",
+        },
+        required: true,
+      },
+    },
+  };
+
+  const component = {
+    name: "Fleet",
+    version: "1.0.0",
+    schema: "EngineCollection",
+    properties: {
+      engines: [
+        {
+          name: "MissingEngineA",
+          version: "1.0.0",
+          properties: {},
+        },
+        {
+          name: "MissingEngineB",
+          version: "1.0.0",
+          properties: {},
+        },
+      ],
+    },
+  };
+
+  const result = compileComponent(
+    schema,
+    component,
+    [],
+    [schema, engineSchema],
+  );
+
+  assert.equal(result.ok, false);
+
+  if (!result.ok) {
+    const missingComponentPaths = result.diagnostics
+      .filter(
+        (diagnostic) => diagnostic.code === "COMPONENT_NOT_FOUND",
+      )
+      .map((diagnostic) => diagnostic.path);
+
+    assert.deepEqual(missingComponentPaths, [
+      "properties.engines[0]",
+      "properties.engines[1]",
+    ]);
   }
 });
 
@@ -1693,6 +2037,40 @@ test("interpolation resolves recursively inside objects and arrays", () => {
   }
 });
 
+test("malformed interpolation paths produce INVALID_INTERPOLATION", () => {
+  const schema = {
+    name: "Configuration",
+    properties: {
+      description: { type: "string", required: true },
+    },
+  };
+
+  const component = {
+    name: "App",
+    version: "1.0.0",
+    schema: "Configuration",
+    properties: {
+      description: "${text:context..environment}",
+    },
+  };
+
+  const result = compileComponent(
+    schema,
+    component,
+    [],
+    [schema],
+    { environment: "production" },
+  );
+
+  assert.equal(result.ok, false);
+  assert.ok(
+    result.diagnostics.some(
+      (diagnostic) =>
+        diagnostic.code === "INVALID_INTERPOLATION",
+    ),
+  );
+});
+
 test("missing interpolation sources produce diagnostics", () => {
   const schema = {
     name: "Configuration",
@@ -2402,6 +2780,73 @@ test("validateComponent handles malformed component fields without throwing", ()
   }
 });
 
+test("validateComponent reports SCHEMA_MISMATCH at schema", () => {
+  const schema = {
+    name: "Vehicle",
+    properties: {},
+  };
+
+  const component = {
+    name: "Car",
+    version: "1.0.0",
+    schema: "Aircraft",
+    properties: {},
+  };
+
+  const diagnostics = validateComponent(schema, component);
+
+  assert.ok(
+    diagnostics.some(
+      (diagnostic) =>
+        diagnostic.code === "SCHEMA_MISMATCH" &&
+        diagnostic.path === "schema",
+    ),
+    JSON.stringify(diagnostics, null, 2),
+  );
+});
+
+test("validateComponent reports invalid component identity fields", () => {
+  const schema = {
+    name: "Vehicle",
+    properties: {},
+  };
+
+  const cases = [
+    {
+      component: {
+        name: 123,
+        version: "1.0.0",
+        schema: "Vehicle",
+        properties: {},
+      },
+      code: "INVALID_COMPONENT_NAME",
+      path: "name",
+    },
+    {
+      component: {
+        name: "Vehicle",
+        version: null,
+        schema: "Vehicle",
+        properties: {},
+      },
+      code: "INVALID_COMPONENT_VERSION",
+      path: "version",
+    },
+  ];
+
+  for (const { component, code, path } of cases) {
+    const diagnostics = validateComponent(schema, component);
+
+    assert.ok(
+      diagnostics.some(
+        (diagnostic) =>
+          diagnostic.code === code && diagnostic.path === path,
+      ),
+      `Expected ${code} at ${path}; got ${JSON.stringify(diagnostics)}`,
+    );
+  }
+});
+
 test("validateComponent handles malformed schema inputs without throwing", () => {
   const component = {
     name: "Vehicle",
@@ -2422,6 +2867,70 @@ test("validateComponent handles malformed schema inputs without throwing", () =>
       assert.ok(Array.isArray(diagnostics));
       assert.ok(diagnostics.length > 0);
     });
+  }
+});
+
+test("compileComponent reports invalid registry, schemas, and context", () => {
+  const schema = {
+    name: "Vehicle",
+    properties: {},
+  };
+
+  const component = {
+    name: "Car",
+    version: "1.0.0",
+    schema: "Vehicle",
+    properties: {},
+  };
+
+  const cases = [
+    {
+      registry: [null],
+      schemas: [schema],
+      context: {},
+      code: "INVALID_REGISTRY",
+      path: "registry",
+    },
+    {
+      registry: [],
+      schemas: [null],
+      context: {},
+      code: "INVALID_SCHEMAS",
+      path: "schemas",
+    },
+    {
+      registry: [],
+      schemas: [schema],
+      context: "invalid",
+      code: "INVALID_CONTEXT",
+      path: "context",
+    },
+  ];
+
+  for (const { registry, schemas, context, code, path } of cases) {
+    const result = compileComponent(
+      schema,
+      component,
+      registry,
+      schemas,
+      context,
+    );
+
+    assert.equal(
+      result.ok,
+      false,
+      `Expected ${code} at ${path}; got ${JSON.stringify(result)}`,
+    );
+
+    if (!result.ok) {
+      assert.ok(
+        result.diagnostics.some(
+          (diagnostic) =>
+            diagnostic.code === code && diagnostic.path === path,
+        ),
+        `Expected ${code} at ${path}; got ${JSON.stringify(result.diagnostics)}`,
+      );
+    }
   }
 });
 
@@ -2782,6 +3291,15 @@ test("$append rejects malformed array operators", () => {
       result.ok,
       false,
       `Expected ${JSON.stringify(invalidValue)} to be rejected`,
+    );
+
+    assert.ok(
+      result.diagnostics.some(
+        (diagnostic) =>
+          diagnostic.code === "INVALID_ARRAY_APPEND" &&
+          diagnostic.path === "properties.tags",
+      ),
+      `Expected INVALID_ARRAY_APPEND at properties.tags; got ${JSON.stringify(result.diagnostics)}`,
     );
   }
 });
